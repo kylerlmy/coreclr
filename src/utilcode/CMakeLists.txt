@@ -55,6 +55,7 @@ set(UTILCODE_COMMON_SOURCES
   pedecoder.cpp
   winfix.cpp
   longfilepathwrappers.cpp
+  yieldprocessornormalized.cpp
 )
 
 # These source file do not yet compile on Linux.
@@ -99,6 +100,8 @@ set(UTILCODE_STATICNOHOST_SOURCES
   ${UTILCODE_COMMON_SOURCES}
   hostimpl.cpp
 )
+
+set (UTILCODE_DEPENDENCIES eventing_headers)
 
 convert_to_absolute_path(UTILCODE_SOURCES ${UTILCODE_SOURCES})
 convert_to_absolute_path(UTILCODE_DAC_SOURCES ${UTILCODE_DAC_SOURCES})

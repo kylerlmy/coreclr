@@ -22,19 +22,6 @@ inline void GlobalLoaderAllocator::Init(BaseDomain *pDomain)
     LoaderAllocator::Init(pDomain, m_ExecutableHeapInstance);
 }
 
-inline void AppDomainLoaderAllocator::Init(AppDomain *pAppDomain) 
-{
-    WRAPPER_NO_CONTRACT;
-    m_Id.Init(pAppDomain);
-    LoaderAllocator::Init((BaseDomain *)pAppDomain);
-}
-
-inline void LoaderAllocatorID::Init(AppDomain *pAppDomain)
-{
-    m_type = LAT_AppDomain;
-    m_pAppDomain = pAppDomain;
-}
-
 inline void AssemblyLoaderAllocator::Init(AppDomain* pAppDomain)
 {
     m_Id.Init();
@@ -94,13 +81,6 @@ inline DomainAssemblyIterator LoaderAllocatorID::GetDomainAssemblyIterator()
     return DomainAssemblyIterator(m_pDomainAssembly);
 }
 
-inline AppDomain *LoaderAllocatorID::GetAppDomain()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    _ASSERTE(m_type == LAT_AppDomain);
-    return m_pAppDomain;
-}
-
 inline LoaderAllocatorID* AssemblyLoaderAllocator::Id()
 {
     LIMITED_METHOD_DAC_CONTRACT; 
@@ -110,12 +90,6 @@ inline LoaderAllocatorID* AssemblyLoaderAllocator::Id()
 inline LoaderAllocatorID* GlobalLoaderAllocator::Id()
 {
     LIMITED_METHOD_DAC_CONTRACT; 
-    return &m_Id;
-}
-
-inline LoaderAllocatorID* AppDomainLoaderAllocator::Id()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
     return &m_Id;
 }
 
@@ -179,5 +153,66 @@ FORCEINLINE OBJECTREF LoaderAllocator::GetHandleValueFastCannotFailType2(LOADERH
 
     return handleTable->GetAt(index);
 }
+
+inline bool SegmentedHandleIndexStack::Push(DWORD value)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    if (m_TOSIndex == Segment::Size)
+    {
+        Segment* segment;
+
+        if (m_freeSegment == NULL)
+        {
+            segment = new (nothrow) Segment();
+            if (segment == NULL)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            segment = m_freeSegment;
+            m_freeSegment = NULL;
+        }
+
+        segment->m_prev = m_TOSSegment;
+        m_TOSSegment = segment;
+
+        m_TOSIndex = 0;
+    }
+
+    m_TOSSegment->m_data[m_TOSIndex++] = value;
+    return true;
+}
+
+inline DWORD SegmentedHandleIndexStack::Pop()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    _ASSERTE(!IsEmpty());
+
+    if (m_TOSIndex == 0)
+    {
+        Segment* prevSegment = m_TOSSegment->m_prev;
+        _ASSERTE(prevSegment != NULL);
+
+        delete m_freeSegment;
+        m_freeSegment = m_TOSSegment;
+
+        m_TOSSegment = prevSegment;
+        m_TOSIndex = Segment::Size;
+    }
+
+    return m_TOSSegment->m_data[--m_TOSIndex];
+}
+
+inline bool SegmentedHandleIndexStack::IsEmpty()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    return (m_TOSSegment == NULL) || ((m_TOSIndex == 0) && (m_TOSSegment->m_prev == NULL));
+}
+
 #endif //  _LOADER_ALLOCATOR_I
 

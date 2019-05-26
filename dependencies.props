@@ -4,64 +4,33 @@
   <PropertyGroup>
     <RestoreSources Condition="'$(DotNetBuildOffline)' != 'true'">
       https://dotnetfeed.blob.core.windows.net/dotnet-core/index.json;
+      https://dotnetfeed.blob.core.windows.net/dotnet-coreclr/index.json;
       https://dotnet.myget.org/F/dotnet-core/api/v3/index.json;
       https://api.nuget.org/v3/index.json;
       $(RestoreSources)
     </RestoreSources>
   </PropertyGroup>
 
-  <PropertyGroup>
-    <!-- Central place to set the versions of all nuget packages produced in the repo -->
-    <PackageVersion Condition="'$(PackageVersion)' == ''">3.0.0</PackageVersion>
-
-    <!-- Set the boolean below to true to generate packages with stabilized versions -->
-    <StabilizePackageVersion Condition="'$(StabilizePackageVersion)' == ''">false</StabilizePackageVersion>
-    <StableVersion Condition="'$(StabilizePackageVersion)' == 'true' and '$(StableVersion)' == ''">$(PackageVersion)</StableVersion>
-
-    <PreReleaseLabel>preview1</PreReleaseLabel>
-  </PropertyGroup>
+  <Import Project="eng/Versions.props" />
 
   <!-- Source of truth for dependency tooling: the commit hash of the dotnet/versions master branch as of the last auto-upgrade. -->
   <PropertyGroup>
-    <CoreFxCurrentRef>85f74094769cc187fcd22650564cd7587483d656</CoreFxCurrentRef>
-    <CoreClrCurrentRef>85f74094769cc187fcd22650564cd7587483d656</CoreClrCurrentRef>
-    <BuildToolsCurrentRef>e0c1d36d8a19fed21cadfff4890e027bd4c2c214</BuildToolsCurrentRef>
-    <PgoDataCurrentRef>85f74094769cc187fcd22650564cd7587483d656</PgoDataCurrentRef>
-    <CoreSetupCurrentRef>85f74094769cc187fcd22650564cd7587483d656</CoreSetupCurrentRef>
-    <IbcDataCurrentRef>e0c1d36d8a19fed21cadfff4890e027bd4c2c214</IbcDataCurrentRef>
+    <CoreClrCurrentRef>6bb061a058d47fc7265147b804d8fb0d97c1c230</CoreClrCurrentRef>
+    <BuildToolsCurrentRef>00797464e62272e9c721a1854abe49ff05743bdf</BuildToolsCurrentRef>
   </PropertyGroup>
 
   <!-- Tests/infrastructure dependency versions. -->
   <PropertyGroup>
-    <MicrosoftPrivateCoreFxNETCoreAppPackageVersion>4.6.0-preview1-26927-03</MicrosoftPrivateCoreFxNETCoreAppPackageVersion>
-    <MicrosoftNETCorePlatformsPackageVersion>3.0.0-preview1-26927-03</MicrosoftNETCorePlatformsPackageVersion>
-    <PgoDataPackageVersion>99.99.99-master-20180926-0038</PgoDataPackageVersion>
-    <MicrosoftNETCoreRuntimeCoreCLRPackageVersion>3.0.0-preview1-26927-03</MicrosoftNETCoreRuntimeCoreCLRPackageVersion>
-    <MicrosoftNETCoreAppPackageVersion>3.0.0-preview1-26927-01</MicrosoftNETCoreAppPackageVersion>
-    <XunitPackageVersion>2.4.0-beta.2.build4010</XunitPackageVersion>
-    <IbcDataPackageVersion>99.99.99-master-20180917-0046</IbcDataPackageVersion>
-    <IbcMergePackageVersion>4.6.0-alpha-00001</IbcMergePackageVersion>
+    <MicrosoftNETCoreRuntimeCoreCLRPackageVersion>3.0.0-preview6.19274.71</MicrosoftNETCoreRuntimeCoreCLRPackageVersion>
+    <XunitPackageVersion>2.4.1-pre.build.4059</XunitPackageVersion>
     <XunitPerformanceApiPackageVersion>1.0.0-beta-build0015</XunitPerformanceApiPackageVersion>
-    <MicrosoftDiagnosticsTracingTraceEventPackageVersion>2.0.4</MicrosoftDiagnosticsTracingTraceEventPackageVersion>
+    <MicrosoftDiagnosticsTracingTraceEventPackageVersion>2.0.40</MicrosoftDiagnosticsTracingTraceEventPackageVersion>
     <CommandLineParserVersion>2.2.0</CommandLineParserVersion>
-    <VCRuntimeVersion>2.0.0</VCRuntimeVersion>
-    
+
     <!-- Scenario tests install this version of Microsoft.NetCore.App, then patch coreclr binaries via xcopy. At the moment it is
          updated manually whenever breaking changes require it to move forward, but it would be nice if we could update it automatically
          as we do with many of the package versions above -->
     <BaselineMicrosoftNetCoreAppPackageVersion>2.1.0-preview3-26416-01</BaselineMicrosoftNetCoreAppPackageVersion>
-  </PropertyGroup>
-
-  <!-- Package versions used as toolsets -->
-  <PropertyGroup>
-    <FeedTasksPackage>Microsoft.DotNet.Build.Tasks.Feed</FeedTasksPackage>
-    <FeedTasksPackageVersion>3.0.0-preview1-03224-03</FeedTasksPackageVersion>
-  </PropertyGroup>
-
-  <!-- Publish symbol build task package -->
-  <PropertyGroup>
-    <PublishSymbolsPackage>Microsoft.SymbolUploader.Build.Task</PublishSymbolsPackage>
-    <PublishSymbolsPackageVersion>1.0.0-beta-62806-01</PublishSymbolsPackageVersion>
   </PropertyGroup>
 
   <!-- Package dependency verification/auto-upgrade configuration. -->
@@ -78,10 +47,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <RemoteDependencyBuildInfo Include="CoreFx">
-      <BuildInfoPath>$(BaseDotNetBuildInfo)corefx/$(DependencyBranch)</BuildInfoPath>
-      <CurrentRef>$(CoreFxCurrentRef)</CurrentRef>
-    </RemoteDependencyBuildInfo>
     <RemoteDependencyBuildInfo Include="CoreClr">
       <BuildInfoPath>$(BaseDotNetBuildInfo)coreclr/$(DependencyBranch)</BuildInfoPath>
       <CurrentRef>$(CoreClrCurrentRef)</CurrentRef>
@@ -90,63 +55,21 @@
       <BuildInfoPath>$(BaseDotNetBuildInfo)buildtools/$(DependencyBranch)</BuildInfoPath>
       <CurrentRef>$(BuildToolsCurrentRef)</CurrentRef>
     </RemoteDependencyBuildInfo>
-    <RemoteDependencyBuildInfo Include="PgoData">
-      <BuildInfoPath>$(BaseDotNetBuildInfo)optimization/$(DependencyBranch)</BuildInfoPath>
-      <CurrentRef>$(PgoDataCurrentRef)</CurrentRef>
-    </RemoteDependencyBuildInfo>
-    <RemoteDependencyBuildInfo Include="IbcData">
-      <BuildInfoPath>$(BaseDotNetBuildInfo)optimization/$(DependencyBranch)</BuildInfoPath>
-      <CurrentRef>$(IbcDataCurrentRef)</CurrentRef>
-    </RemoteDependencyBuildInfo>
-    <RemoteDependencyBuildInfo Include="CoreSetup">
-      <BuildInfoPath>$(BaseDotNetBuildInfo)core-setup/$(DependencyBranch)</BuildInfoPath>
-      <CurrentRef>$(CoreSetupCurrentRef)</CurrentRef>
-    </RemoteDependencyBuildInfo>
 
     <DependencyBuildInfo Include="@(RemoteDependencyBuildInfo)">
       <RawVersionsBaseUrl>https://raw.githubusercontent.com/dotnet/versions</RawVersionsBaseUrl>
     </DependencyBuildInfo>
 
-    <XmlUpdateStep Include="CoreFx">
-      <Path>$(MSBuildThisFileFullPath)</Path>
-      <ElementName>MicrosoftPrivateCoreFxNETCoreAppPackageVersion</ElementName>
-      <PackageId>Microsoft.Private.CoreFx.NETCoreApp</PackageId>
-    </XmlUpdateStep>
-    <XmlUpdateStep Include="CoreFx">
-      <Path>$(MSBuildThisFileFullPath)</Path>
-      <ElementName>MicrosoftNETCorePlatformsPackageVersion</ElementName>
-      <PackageId>Microsoft.NETCore.Platforms</PackageId>
-    </XmlUpdateStep>
     <XmlUpdateStep Include="CoreClr">
       <Path>$(MSBuildThisFileFullPath)</Path>
       <ElementName>MicrosoftNETCoreRuntimeCoreCLRPackageVersion</ElementName>
       <PackageId>Microsoft.NETCore.Runtime.CoreCLR</PackageId>
     </XmlUpdateStep>
-    <XmlUpdateStep Include="CoreSetup">
-      <Path>$(MSBuildThisFileFullPath)</Path>
-      <ElementName>MicrosoftNETCoreAppPackageVersion</ElementName>
-      <PackageId>Microsoft.NETCore.App</PackageId>
-    </XmlUpdateStep>
-    <!-- <UpdateStep Include="BuildTools">
+    <UpdateStep Include="BuildTools">
       <UpdaterType>File</UpdaterType>
       <Path>$(MSBuildThisFileDirectory)BuildToolsVersion.txt</Path>
       <PackageId>Microsoft.DotNet.BuildTools</PackageId>
     </UpdateStep>
-    <XmlUpdateStep Include="BuildTools">
-       <Path>$(MSBuildThisFileFullPath)</Path>
-       <ElementName>FeedTasksPackageVersion</ElementName>
-       <PackageId>$(FeedTasksPackage)</PackageId>
-    </XmlUpdateStep> -->
-    <XmlUpdateStep Include="PgoData">
-      <Path>$(MSBuildThisFileFullPath)</Path>
-      <ElementName>PgoDataPackageVersion</ElementName>
-      <PackageId>optimization.PGO.CoreCLR</PackageId>
-    </XmlUpdateStep>
-    <XmlUpdateStep Include="Data">
-      <Path>$(MSBuildThisFileFullPath)</Path>
-      <ElementName>IbcDataPackageVersion</ElementName>
-      <PackageId>optimization.IBC.CoreCLR</PackageId>
-    </XmlUpdateStep>
     <UpdateStep Include="ILAsm">
       <UpdaterType>File</UpdaterType>
       <Path>$(MSBuildThisFileDirectory)ILAsmVersion.txt</Path>

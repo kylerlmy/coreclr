@@ -3979,7 +3979,7 @@ void GCInfo::gcInfoBlockHdrSave(GcInfoEncoder* gcInfoEncoder, unsigned methodSiz
     {
         // The predicate above is true only if there is an extra generic context parameter, not for
         // the case where the generic context is provided by "this."
-        assert(compiler->info.compTypeCtxtArg != BAD_VAR_NUM);
+        assert((SIZE_T)compiler->info.compTypeCtxtArg != BAD_VAR_NUM);
         GENERIC_CONTEXTPARAM_TYPE ctxtParamType = GENERIC_CONTEXTPARAM_NONE;
         switch (compiler->info.compMethodInfo->options & CORINFO_GENERICS_CTXT_MASK)
         {
@@ -4216,14 +4216,7 @@ void GCInfo::gcMakeRegPtrTable(
                 }
                 else
                 {
-                    if (!varDsc->lvOnFrame)
-                    {
-                        // If this non-enregistered pointer arg is never
-                        // used, we don't need to report it.
-                        assert(varDsc->lvRefCnt() == 0);
-                        continue;
-                    }
-                    else if (varDsc->lvIsRegArg && varDsc->lvTracked)
+                    if (varDsc->lvIsRegArg && varDsc->lvTracked)
                     {
                         // If this register-passed arg is tracked, then
                         // it has been allocated space near the other
@@ -4818,6 +4811,7 @@ void GCInfo::gcMakeVarPtrTable(GcInfoEncoder* gcInfoEncoder, MakeRegPtrMode mode
         {
             flags = (GcSlotFlags)(flags | GC_SLOT_INTERIOR);
         }
+
         if ((lowBits & pinned_OFFSET_FLAG) != 0)
         {
             flags = (GcSlotFlags)(flags | GC_SLOT_PINNED);

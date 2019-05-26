@@ -149,7 +149,6 @@ void ZapImage::InitializeSections()
     m_pStubDispatchDataSection->Place(m_pStubDispatchDataTable);
 
     m_pImportTable = new (GetHeap()) ZapImportTable(this);
-    m_pImportTableSection->Place(m_pImportTable);
 
     m_pGCInfoTable = new (GetHeap()) ZapGCInfoTable(this);
     m_pExceptionInfoLookupTable = new (GetHeap()) ZapExceptionInfoLookupTable(this);
@@ -229,7 +228,6 @@ void ZapImage::InitializeSectionsForReadyToRun()
     }
 
     m_pImportTable = new (GetHeap()) ZapImportTable(this);
-    m_pImportTableSection->Place(m_pImportTable);
 
     for (int i=0; i<ZapImportSectionType_Total; i++)
     {
@@ -564,6 +562,7 @@ void ZapImage::AllocateVirtualSections()
         if (IsReadyToRunCompilation())
         {
             m_pAvailableTypesSection = NewVirtualSection(pTextSection, IBCUnProfiledSection | WarmRange | ReadonlySection);
+            m_pAttributePresenceSection = NewVirtualSection(pTextSection, IBCUnProfiledSection | WarmRange | ReadonlyDataSection, 16/* Must be 16 byte aligned */);
         }
 #endif    
 
@@ -1027,8 +1026,8 @@ HANDLE ZapImage::GenerateFile(LPCWSTR wszOutputFileName, CORCOMPILE_NGEN_SIGNATU
     {    
         // Write the debug directory entry for the NGEN PDB
         RSDS rsds = {0};
-        
-        rsds.magic = 'SDSR';
+
+        rsds.magic = VAL32(0x53445352); // "SDSR";
         rsds.age = 1;
         // our PDB signature will be the same as our NGEN signature.  
         // However we want the printed version of the GUID to be be the same as the
@@ -1084,7 +1083,7 @@ HANDLE ZapImage::GenerateFile(LPCWSTR wszOutputFileName, CORCOMPILE_NGEN_SIGNATU
 
 HANDLE ZapImage::SaveImage(LPCWSTR wszOutputFileName, LPCWSTR wszDllPath, CORCOMPILE_NGEN_SIGNATURE * pNativeImageSig)
 {
-    if (!IsReadyToRunCompilation())
+    if(!IsReadyToRunCompilation() || IsLargeVersionBubbleEnabled())
     {
         OutputManifestMetadata();
     }
@@ -1165,8 +1164,6 @@ void ZapImage::PrintStats(LPCWSTR wszOutputFileName)
     ACCUM_SIZE(m_stats->m_dynamicInfoDelayListSize, m_pDelayLoadInfoDelayListSectionEager);
     ACCUM_SIZE(m_stats->m_dynamicInfoDelayListSize, m_pDelayLoadInfoDelayListSectionHot);
     ACCUM_SIZE(m_stats->m_dynamicInfoDelayListSize, m_pDelayLoadInfoDelayListSectionCold);
-
-    ACCUM_SIZE(m_stats->m_importTableSize, m_pImportTable);
 
     ACCUM_SIZE(m_stats->m_debuggingTableSize, m_pDebugSection);
     ACCUM_SIZE(m_stats->m_headerSectionSize, m_pGCSection);
@@ -1500,7 +1497,7 @@ void ZapImage::OutputTables()
     }
 
     CopyDebugDirEntry();
-    CopyWin32VersionResource();
+    CopyWin32Resources();
 
     if (m_pILMetaData != NULL)
     {
@@ -1539,6 +1536,10 @@ void ZapImage::OutputTables()
 #endif // _DEBUG
         {
             dllCharacteristics |= IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+#ifdef _TARGET_64BIT_
+            // Large address aware, required for High Entry VA, is always enabled for 64bit native images.
+            dllCharacteristics |= IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA;
+#endif
         }
 
         SetDllCharacteristics(dllCharacteristics);
@@ -1833,8 +1834,13 @@ void ZapImage::Compile()
         OutputEntrypointsTableForReadyToRun();
         OutputDebugInfoForReadyToRun();
         OutputTypesTableForReadyToRun(m_pMDImport);
+        OutputAttributePresenceFilter(m_pMDImport);
         OutputInliningTableForReadyToRun();
         OutputProfileDataForReadyToRun();
+        if (IsLargeVersionBubbleEnabled())
+        {
+            OutputManifestMetadataForReadyToRun();
+        }
     }
     else
 #endif
@@ -2124,13 +2130,6 @@ ZapImage::CompileStatus ZapImage::TryCompileMethodWorker(CORINFO_METHOD_HANDLE h
 
     CompileStatus result = NOT_COMPILED;
     
-    // This is an entry point into the JIT which can call back into the VM. There are methods in the
-    // JIT that will swallow exceptions and only the VM guarentees that exceptions caught or swallowed
-    // with restore the debug state of the stack guards. So it is necessary to ensure that the status
-    // is restored on return from the call into the JIT, which this light-weight transition macro
-    // will do.
-    REMOVE_STACK_GUARD;
-
     CORINFO_MODULE_HANDLE module;
 
     // We only compile IL_STUBs from the current assembly
@@ -2173,14 +2172,14 @@ ZapImage::CompileStatus ZapImage::TryCompileMethodWorker(CORINFO_METHOD_HANDLE h
         //     messages to the console
         if (IsReadyToRunCompilation())
         {
-            // When compiling the method we may recieve an exeception when the
+            // When compiling the method we may receive an exeception when the
             // method uses a feature that is Not Implemented for ReadyToRun 
             // or a Type Load exception if the method uses for a SIMD type.
             //
             // We skip the compilation of such methods and we don't want to
             // issue a warning or error
             //
-            if ((hrException == E_NOTIMPL) || (hrException == IDS_CLASSLOAD_GENERAL))
+            if ((hrException == E_NOTIMPL) || (hrException == (HRESULT)IDS_CLASSLOAD_GENERAL))
             {
                 result = NOT_COMPILED;
                 level = CORZAP_LOGLEVEL_INFO;
@@ -2241,20 +2240,20 @@ BOOL ZapImage::ShouldCompileMethodDef(mdMethodDef md)
     mdToken tkExtends;
     if (td != mdTypeDefNil)
     {
-        m_pMDImport->GetTypeDefProps(td, NULL, &tkExtends);
+        IfFailThrow(m_pMDImport->GetTypeDefProps(td, NULL, &tkExtends));
         
         mdAssembly tkAssembly;
         DWORD dwAssemblyFlags;
         
-        m_pMDImport->GetAssemblyFromScope(&tkAssembly);
+        IfFailThrow(m_pMDImport->GetAssemblyFromScope(&tkAssembly));
         if (TypeFromToken(tkAssembly) == mdtAssembly)
         {
-            m_pMDImport->GetAssemblyProps(tkAssembly,
+            IfFailThrow(m_pMDImport->GetAssemblyProps(tkAssembly,
                                             NULL, NULL,     // Public Key
                                             NULL,           // Hash Algorithm
                                             NULL,           // Name
                                             NULL,           // MetaData
-                                            &dwAssemblyFlags);
+                                            &dwAssemblyFlags));
             
             if (IsAfContentType_WindowsRuntime(dwAssemblyFlags))
             {
@@ -2262,7 +2261,7 @@ BOOL ZapImage::ShouldCompileMethodDef(mdMethodDef md)
                 {
                     LPCSTR szNameSpace = NULL;
                     LPCSTR szName = NULL;
-                    m_pMDImport->GetNameOfTypeRef(tkExtends, &szNameSpace, &szName);
+                    IfFailThrow(m_pMDImport->GetNameOfTypeRef(tkExtends, &szNameSpace, &szName));
                     
                     if (!strcmp(szNameSpace, "System") && !_stricmp((szName), "Attribute"))
                     {
@@ -2451,7 +2450,6 @@ HRESULT ZapImage::LocateProfileData()
         return S_FALSE;
     }
 
-#if !defined(FEATURE_PAL)
     //
     // See if there's profile data in the resource section of the PE
     //
@@ -2466,7 +2464,6 @@ HRESULT ZapImage::LocateProfileData()
     static ConfigDWORD g_UseIBCFile;
     if (g_UseIBCFile.val(CLRConfig::EXTERNAL_UseIBCFile) != 1)
         return S_OK;
-#endif
 
     //
     // Couldn't find profile resource--let's see if there's an ibc file to use instead
@@ -3281,7 +3278,7 @@ HRESULT ZapImage::RehydrateProfileData()
     return hr;
 }
 
-HRESULT ZapImage::hashBBProfileData ()
+HRESULT ZapImage::hashMethodBlockCounts()
 {
     ProfileDataSection * DataSection_MethodBlockCounts = & m_profileDataSections[MethodBlockCounts];
 
@@ -3295,7 +3292,7 @@ HRESULT ZapImage::hashBBProfileData ()
     CORBBTPROF_METHOD_BLOCK_COUNTS_SECTION_HEADER *mbcHeader;
     READ(mbcHeader,CORBBTPROF_METHOD_BLOCK_COUNTS_SECTION_HEADER);
 
-    for (ULONG i = 0; i < mbcHeader->NumMethods; i++)
+    for (DWORD i = 0; i < mbcHeader->NumMethods; i++)
     {
         ProfileDataHashEntry newEntry;
         newEntry.pos = profileReader.GetCurrentPos();
@@ -3362,7 +3359,7 @@ void ZapImage::LoadProfileData()
             hr = parseProfileData();
             if (hr == S_OK)
             {
-                hr = hashBBProfileData();
+                hr = hashMethodBlockCounts();
             }
         }
     }
@@ -3383,6 +3380,13 @@ void ZapImage::LoadProfileData()
             m_zapper->Warning(W("Warning: Invalid profile data was ignored for %s\n"), m_pModuleFileName);
         }
     }
+
+#ifdef CROSSGEN_COMPILE
+    if (m_zapper->m_pOpt->m_fPartialNGen && (m_pRawProfileData == NULL || m_cRawProfileData == 0))
+    {
+        ThrowHR(CLR_E_CROSSGEN_NO_IBC_DATA_FOUND);
+    }
+#endif
 }
 
 // Initializes our form of the profile data stored in the assembly.
@@ -3571,6 +3575,10 @@ void ZapImage::Error(mdToken token, HRESULT hr, UINT resID,  LPCWSTR message)
     if ((resID == IDS_IBC_MISSING_EXTERNAL_TYPE) ||
         (resID == IDS_IBC_MISSING_EXTERNAL_METHOD))
     {
+        // Suppress printing IBC related warnings except in verbose mode.
+        if (m_zapper->m_pOpt->m_ignoreErrors && !m_zapper->m_pOpt->m_verbose)
+            return;
+
         // Supress printing of "The generic type/method specified by the IBC data is not available to this assembly"
         level = CORZAP_LOGLEVEL_INFO;
     }   

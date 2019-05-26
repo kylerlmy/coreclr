@@ -201,21 +201,6 @@ typedef unsigned char   regNumberSmall;
 // #define PSEUDORANDOM_NOP_INSERTION
 // #endif
 
-// TODO-Cleanup: FEATURE_PREVENT_BAD_BYREFS guards code that prevents creating byref pointers to array elements
-// that are not "complete". That is, it only allows byref pointers to the exact array element, not to a portion
-// of the address expression leading to the full addressing expression. This prevents the possibility of creating
-// an illegal byref, which is an expression that points outside of the "host" object. Such bad byrefs won't get
-// updated properly during a GC, leaving them to point to garbage. This led to a GC hole on ARM due to ARM's
-// limited addressing modes (found in GCStress). The change is applicable and possibly desirable for other platforms,
-// but was put under ifdef to avoid introducing potential destabilizing change to those platforms at the end of the
-// .NET Core 2.1 ship cycle. More detail here: https://github.com/dotnet/coreclr/pull/17524. Consider making this
-// all-platform and removing these #ifdefs.
-#if defined(_TARGET_ARM_)
-#define FEATURE_PREVENT_BAD_BYREFS 1
-#else
-#define FEATURE_PREVENT_BAD_BYREFS 0
-#endif
-
 /*****************************************************************************/
 
 // clang-format off
@@ -261,6 +246,7 @@ typedef unsigned char   regNumberSmall;
   #define FEATURE_MULTIREG_ARGS_OR_RET  1  // Support for passing and/or returning single values in more than one register
   #define FEATURE_MULTIREG_ARGS         0  // Support for passing a single argument in more than one register  
   #define FEATURE_MULTIREG_RET          1  // Support for returning a single value in more than one register
+  #define MAX_PASS_SINGLEREG_BYTES      8  // Maximum size of a struct passed in a single register (double).
   #define MAX_PASS_MULTIREG_BYTES       0  // No multireg arguments (note this seems wrong as MAX_ARG_REG_COUNT is 2)
   #define MAX_RET_MULTIREG_BYTES        8  // Maximum size of a struct that could be returned in more than one register
 
@@ -503,6 +489,15 @@ typedef unsigned char   regNumberSmall;
   #define INS_stosp                INS_stosd
   #define INS_r_stosp              INS_r_stosd
 
+  // Any stack pointer adjustments larger than this (in bytes) when setting up outgoing call arguments
+  // requires a stack probe. Set it large enough so all normal stack arguments don't get a probe.
+  #define ARG_STACK_PROBE_THRESHOLD_BYTES 1024
+
+  // The number of bytes from the end the last probed page that must also be probed, to allow for some
+  // small SP adjustments without probes. If zero, then the stack pointer can point to the last byte/word
+  // on the stack guard page, and must be touched before any further "SUB SP".
+  #define STACK_PROBE_BOUNDARY_THRESHOLD_BYTES ARG_STACK_PROBE_THRESHOLD_BYTES
+
 #elif defined(_TARGET_AMD64_)
   // TODO-AMD64-CQ: Fine tune the following xxBlk threshold values:
  
@@ -546,6 +541,7 @@ typedef unsigned char   regNumberSmall;
   #define FEATURE_FASTTAILCALL     1       // Tail calls made as epilog+jmp
   #define FEATURE_TAILCALL_OPT     1       // opportunistic Tail calls (i.e. without ".tail" prefix) made as fast tail calls.
   #define FEATURE_SET_FLAGS        0       // Set to true to force the JIT to mark the trees with GTF_SET_FLAGS when the flags need to be set
+  #define MAX_PASS_SINGLEREG_BYTES      8  // Maximum size of a struct passed in a single register (double).
 #ifdef    UNIX_AMD64_ABI
   #define FEATURE_MULTIREG_ARGS_OR_RET  1  // Support for passing and/or returning single values in more than one register
   #define FEATURE_MULTIREG_ARGS         1  // Support for passing a single argument in more than one register  
@@ -904,6 +900,9 @@ typedef unsigned char   regNumberSmall;
   #define INS_stosp                INS_stosq
   #define INS_r_stosp              INS_r_stosq
 
+  // AMD64 uses FEATURE_FIXED_OUT_ARGS so this can be zero.
+  #define STACK_PROBE_BOUNDARY_THRESHOLD_BYTES 0
+
 #elif defined(_TARGET_ARM_)
 
   // TODO-ARM-CQ: Use shift for division by power of 2
@@ -927,6 +926,7 @@ typedef unsigned char   regNumberSmall;
   #define FEATURE_MULTIREG_ARGS         1  // Support for passing a single argument in more than one register (including passing HFAs)
   #define FEATURE_MULTIREG_RET          1  // Support for returning a single value in more than one register (including HFA returns)
   #define FEATURE_STRUCT_CLASSIFIER     0  // Uses a classifier function to determine is structs are passed/returned in more than one register
+  #define MAX_PASS_SINGLEREG_BYTES      8  // Maximum size of a struct passed in a single register (double).
   #define MAX_PASS_MULTIREG_BYTES      32  // Maximum size of a struct that could be passed in more than one register (Max is an HFA of 4 doubles)
   #define MAX_RET_MULTIREG_BYTES       32  // Maximum size of a struct that could be returned in more than one register (Max is an HFA of 4 doubles)
   #define MAX_ARG_REG_COUNT             4  // Maximum registers used to pass a single argument in multiple registers. (max is 4 floats or doubles using an HFA)
@@ -1209,6 +1209,9 @@ typedef unsigned char   regNumberSmall;
   #define JCC_SIZE_MEDIUM         (4)
   #define JCC_SIZE_LARGE          (6)
 
+  // The first thing in an ARM32 prolog pushes LR to the stack, so this can be 0.
+  #define STACK_PROBE_BOUNDARY_THRESHOLD_BYTES 0
+
 #elif defined(_TARGET_ARM64_)
 
   #define CPU_LOAD_STORE_ARCH      1
@@ -1234,9 +1237,10 @@ typedef unsigned char   regNumberSmall;
   #define FEATURE_MULTIREG_ARGS         1  // Support for passing a single argument in more than one register  
   #define FEATURE_MULTIREG_RET          1  // Support for returning a single value in more than one register  
   #define FEATURE_STRUCT_CLASSIFIER     0  // Uses a classifier function to determine is structs are passed/returned in more than one register
-  #define MAX_PASS_MULTIREG_BYTES      32  // Maximum size of a struct that could be passed in more than one register (max is 4 doubles using an HFA)
-  #define MAX_RET_MULTIREG_BYTES       32  // Maximum size of a struct that could be returned in more than one register (Max is an HFA of 4 doubles)
-  #define MAX_ARG_REG_COUNT             4  // Maximum registers used to pass a single argument in multiple registers. (max is 4 floats or doubles using an HFA)
+  #define MAX_PASS_SINGLEREG_BYTES     16  // Maximum size of a struct passed in a single register (16-byte vector).
+  #define MAX_PASS_MULTIREG_BYTES      64  // Maximum size of a struct that could be passed in more than one register (max is 4 16-byte vectors using an HVA)
+  #define MAX_RET_MULTIREG_BYTES       64  // Maximum size of a struct that could be returned in more than one register (Max is an HVA of 4 16-byte vectors)
+  #define MAX_ARG_REG_COUNT             4  // Maximum registers used to pass a single argument in multiple registers. (max is 4 128-bit vectors using an HVA)
   #define MAX_RET_REG_COUNT             4  // Maximum registers used to return a value.
 
   #define NOGC_WRITE_BARRIERS      1       // We have specialized WriteBarrier JIT Helpers that DO-NOT trash the RBM_CALLEE_TRASH registers
@@ -1346,7 +1350,7 @@ typedef unsigned char   regNumberSmall;
   //       x12: trashed
   //       x14: incremented by 8
   //       x15: trashed
-  //       x17: trashed (ip1) if FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP (currently non-Windows)
+  //       x17: trashed (ip1) if FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP
   // CORINFO_HELP_ASSIGN_BYREF (JIT_ByRefWriteBarrier):
   //     On entry:
   //       x13: the source address (points to object reference to write)
@@ -1356,11 +1360,10 @@ typedef unsigned char   regNumberSmall;
   //       x13: incremented by 8
   //       x14: incremented by 8
   //       x15: trashed
-  //       x17: trashed (ip1) if FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP (currently non-Windows)
+  //       x17: trashed (ip1) if FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP
   //
   // Note that while x17 (ip1) is currently only trashed under FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP,
-  // currently only set for non-Windows, it is expected to be set in the future for Windows, and for R2R.
-  // So simply always consider it trashed, to avoid later breaking changes.
+  // it is expected to be set in the future for R2R. Consider it trashed to avoid later breaking changes.
 
   #define REG_WRITE_BARRIER_DST          REG_R14
   #define RBM_WRITE_BARRIER_DST          RBM_R14
@@ -1544,6 +1547,12 @@ typedef unsigned char   regNumberSmall;
   #define LDC_SIZE_SMALL          (4)
 
   #define JMP_SIZE_SMALL          (4)
+
+  // The number of bytes from the end the last probed page that must also be probed, to allow for some
+  // small SP adjustments without probes. If zero, then the stack pointer can point to the last byte/word
+  // on the stack guard page, and must be touched before any further "SUB SP".
+  // For arm64, this is the maximum prolog establishment pre-indexed (that is SP pre-decrement) offset.
+  #define STACK_PROBE_BOUNDARY_THRESHOLD_BYTES 512
 
 #else
   #error Unsupported or unset target architecture
@@ -1959,10 +1968,10 @@ inline regNumber regNextOfType(regNumber reg, var_types type)
  *  Type checks
  */
 
-inline bool isFloatRegType(int /* s/b "var_types" */ type)
+inline bool isFloatRegType(var_types type)
 {
 #if CPU_HAS_FP_SUPPORT
-    return type == TYP_DOUBLE || type == TYP_FLOAT;
+    return varTypeUsesFloatReg(type);
 #else
     return false;
 #endif

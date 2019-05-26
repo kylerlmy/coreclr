@@ -11,10 +11,12 @@
 ** 
 ===========================================================*/
 
-using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
+#nullable disable // Code in this file isn't actually executed
+using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Security;
 using System.StubHelpers;
 using System.Threading.Tasks;
@@ -23,9 +25,12 @@ using System.Threading.Tasks;
 using System.Runtime.InteropServices.WindowsRuntime;
 #endif // FEATURE_COMINTEROP
 
-[assembly: DefaultDependencyAttribute(LoadHint.Always)]
-// mscorlib would like to have its literal strings frozen if possible
-[assembly: System.Runtime.CompilerServices.StringFreezingAttribute()]
+[assembly: CLSCompliant(true)]
+[assembly: ComVisible(false)]
+[assembly: DefaultDllImportSearchPathsAttribute(DllImportSearchPath.AssemblyDirectory | DllImportSearchPath.System32)]
+
+// Add Serviceable attribute to the assembly metadata
+[assembly: AssemblyMetadata("Serviceable", "True")]
 
 namespace System
 {
@@ -202,6 +207,7 @@ namespace System
         // typed as matching instantiations of mscorlib copies of WinRT interfaces (IIterable<T>, IVector<T>,
         // IMap<K, V>, ...) which is necessary to generate all required IL stubs.
 
+        [MethodImplAttribute(MethodImplOptions.NoOptimization)]
         private static void CommonlyUsedWinRTRedirectedInterfaceStubs()
         {
             WinRT_IEnumerable<byte>(null, null, null);

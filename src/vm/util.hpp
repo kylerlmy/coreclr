@@ -681,10 +681,6 @@ inline BOOL CLRHosted()
 #ifndef FEATURE_PAL
 HMODULE CLRGetModuleHandle(LPCWSTR lpModuleFileName);
 
-// Equivalent to CLRGetModuleHandle(NULL) but doesn't have the INJECT_FAULT contract associated
-// with CLRGetModuleHandle.
-HMODULE CLRGetCurrentModuleHandle();
-
 HMODULE CLRLoadLibraryEx(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags);
 #endif // !FEATURE_PAL
 
@@ -739,10 +735,6 @@ typedef Wrapper<void *, DoNothing, DoNothing> PALPEFileHolder;
 
 void GetProcessMemoryLoad(LPMEMORYSTATUSEX pMSEX);
 
-void ProcessEventForHost(EClrEvent event, void *data);
-void ProcessSOEventForHost(EXCEPTION_POINTERS *pExceptionInfo, BOOL fInSoTolerant);
-BOOL IsHostRegisteredForEvent(EClrEvent event);
-
 #define SetupThreadForComCall(OOMRetVal)            \
     MAKE_CURRENT_THREAD_AVAILABLE_EX(GetThreadNULLOk()); \
     if (CURRENT_THREAD == NULL)                     \
@@ -756,8 +748,7 @@ BOOL IsHostRegisteredForEvent(EClrEvent event);
 #define InternalSetupForComCall(CannotEnterRetVal, OOMRetVal, SORetVal, CheckCanRunManagedCode) \
 SetupThreadForComCall(OOMRetVal);                       \
 if (CheckCanRunManagedCode && !CanRunManagedCode())     \
-    return CannotEnterRetVal;                           \
-SO_INTOLERANT_CODE_NOTHROW(CURRENT_THREAD, return SORetVal)
+    return CannotEnterRetVal;
 
 #define SetupForComCallHRNoHostNotif() InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, true)
 #define SetupForComCallHRNoHostNotifNoCheckCanRunManagedCode() InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, false)
@@ -777,7 +768,6 @@ InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFL
 if (CheckCanRunManagedCode && !CanRunManagedCode())                         \
     return CannotEnterRetVal;                                               \
 SetupThreadForComCall(OOMRetVal);                                           \
-BEGIN_SO_INTOLERANT_CODE_NOTHROW(CURRENT_THREAD, SORetVal)                  \
 
 #define BeginSetupForComCallHRWithEscapingCorruptingExceptions()            \
 HRESULT __hr = S_OK;                                                        \
@@ -788,7 +778,6 @@ if (SUCCEEDED(__hr))                                                        \
 
 #define EndSetupForComCallHRWithEscapingCorruptingExceptions()              \
 }                                                                           \
-END_SO_INTOLERANT_CODE;                                                     \
                                                                             \
 if (FAILED(__hr))                                                           \
 {                                                                           \
@@ -805,25 +794,22 @@ InternalSetupForComCall(-1, -1, -1, true)
 #define SetupForComCallDWORDNoCheckCanRunManagedCode()                      \
 InternalSetupForComCall(-1, -1, -1, false)
 
-#include "unsafe.h"
-
-inline void UnsafeTlsFreeForHolder(DWORD* addr)
+// A holder for NATIVE_LIBRARY_HANDLE.
+FORCEINLINE void VoidFreeNativeLibrary(NATIVE_LIBRARY_HANDLE h)
 {
     WRAPPER_NO_CONTRACT;
 
-    if (addr && *addr != TLS_OUT_OF_INDEXES) {
-        UnsafeTlsFree(*addr);
-        *addr = TLS_OUT_OF_INDEXES;
-    }
+    if (h == NULL)
+        return;
+
+#ifdef FEATURE_PAL
+    PAL_FreeLibraryDirect(h);
+#else
+    FreeLibrary(h);
+#endif
 }
 
-// A holder to make sure tls slot is released and memory for allocated one is set to TLS_OUT_OF_INDEXES
-typedef Holder<DWORD*, DoNothing<DWORD*>, UnsafeTlsFreeForHolder> TlsHolder;
-
-// A holder for HMODULE.
-FORCEINLINE void VoidFreeLibrary(HMODULE h) { WRAPPER_NO_CONTRACT; CLRFreeLibrary(h); }
-
-typedef Wrapper<HMODULE, DoNothing<HMODULE>, VoidFreeLibrary, NULL> ModuleHandleHolder;
+typedef Wrapper<NATIVE_LIBRARY_HANDLE, DoNothing<NATIVE_LIBRARY_HANDLE>, VoidFreeNativeLibrary, NULL> NativeLibraryHandleHolder;
 
 #ifndef FEATURE_PAL
 
@@ -878,29 +864,8 @@ inline bool IsInCantStopRegion()
 }
 #endif // _DEBUG
 
-
-// PAL does not support per-thread locales. The holder is no-op for FEATURE_PALs
-class ThreadLocaleHolder
-{
-#ifndef FEATURE_PAL
-public:
-
-    ThreadLocaleHolder()
-    {
-        m_locale = GetThreadLocale();
-    }
-
-    ~ThreadLocaleHolder();
-
-private:
-    LCID m_locale;
-#endif // !FEATURE_PAL
-};
-
-
-
 BOOL IsValidMethodCodeNotification(USHORT Notification);
-    
+
 typedef DPTR(struct JITNotification) PTR_JITNotification;
 struct JITNotification
 {
@@ -1146,34 +1111,7 @@ extern LONG g_OLEAUT32_Loaded;
 
 BOOL DbgIsExecutable(LPVOID lpMem, SIZE_T length);
 
-#ifndef DACCESS_COMPILE
-// returns if ARM was already enabled or not.
-BOOL EnableARM();
-#endif // !DACCESS_COMPILE
-
 int GetRandomInt(int maxVal);
-
-class InternalCasingHelper {
-
-    private:
-    // Convert szIn to lower case in the Invariant locale.
-    // TODO: NLS Arrowhead -Called by the two ToLowers)
-    static INT32 InvariantToLowerHelper(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn, BOOL fAllowThrow);
-
-    public:
-    //
-    // Native helper functions to do correct casing operations in
-    // runtime native code.
-    //
-
-    // Convert szIn to lower case in the Invariant locale. (WARNING: May throw.)
-    static INT32 InvariantToLower(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn);
-
-    // Convert szIn to lower case in the Invariant locale. (WARNING: This version
-    // won't throw but it will use stack space as an intermediary (so don't
-    // use for ridiculously long strings.)
-    static INT32 InvariantToLowerNoThrow(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn);
-};
 
 //
 //

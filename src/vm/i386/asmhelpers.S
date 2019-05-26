@@ -555,28 +555,6 @@ LEAF_ENTRY PrecodeFixupThunk, _TEXT
     jmp     C_FUNC(ThePreStub)
 LEAF_END PrecodeFixupThunk, _TEXT
 
-// void __stdcall UM2MThunk_WrapperHelper(void *pThunkArgs,
-//                                        int argLen,
-//                                        void *pAddr,
-//                                        UMEntryThunk *pEntryThunk,
-//                                        Thread *pThread)
-NESTED_ENTRY UM2MThunk_WrapperHelper, _TEXT, NoHandler
-    push    ebx
-
-    mov     eax, [esp + 20] // pEntryThunk
-    mov     ecx, [esp + 24] // pThread
-    mov     ebx, [esp + 8]  // pThunkArgs
-
-    sub     esp, 8
-    CHECK_STACK_ALIGNMENT
-    call    [esp + 16 + 8]      // pAddr
-    add     esp, 8
-
-    pop     ebx
-
-    ret     20
-NESTED_END UM2MThunk_WrapperHelper, _TEXT
-
 NESTED_ENTRY UMThunkStubRareDisable, _TEXT, NoHandler
     push    eax
     push    ecx
@@ -747,7 +725,6 @@ LOCAL_LABEL(GoCallCalliWorker):
 LEAF_END GenericPInvokeCalliHelper, _TEXT
 
 #ifdef FEATURE_PREJIT
-
 // =========================================================================
 NESTED_ENTRY StubDispatchFixupStub, _TEXT, NoHandler
     STUB_PROLOG
@@ -777,6 +754,7 @@ PATCH_LABEL StubDispatchFixupPatchLabel
     // which disassembles the epilog to unwind the stack.
     ret
 NESTED_END StubDispatchFixupStub, _TEXT
+#endif // FEATURE_PREJIT
 
 // ==========================================================================
 NESTED_ENTRY ExternalMethodFixupStub, _TEXT_ NoHandler
@@ -864,6 +842,7 @@ NESTED_END DelayLoad_MethodCall, _TEXT
 
 #endif // FEATURE_READYTORUN
 
+#ifdef FEATURE_PREJIT
 // =======================================================================================
 //  The call in softbound vtable slots initially points to this function.
 //  The pupose of this function is to transfer the control to right target and
@@ -913,7 +892,6 @@ PATCH_LABEL VirtualMethodFixupPatchLabel
     // which disassembles the epilog to unwind the stack.
     ret
 NESTED_END VirtualMethodFixupStub, _TEXT
-
 #endif // FEATURE_PREJIT
 
 NESTED_ENTRY ThePreStub, _TEXT, NoHandler

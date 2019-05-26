@@ -5,9 +5,6 @@
 // File: DllImport.h
 //
 
-//
-
-
 #ifndef __dllimport_h__
 #define __dllimport_h__
 
@@ -76,10 +73,14 @@ public:
     //---------------------------------------------------------
     static HRESULT HasNAT_LAttribute(IMDInternalImport *pInternalImport, mdToken token, DWORD dwMemberAttrs);
 
-    static LPVOID NDirectGetEntryPoint(NDirectMethodDesc *pMD, HINSTANCE hMod);
-    static HMODULE LoadLibraryFromPath(LPCWSTR libraryPath);
-    static HINSTANCE LoadLibraryModule(NDirectMethodDesc * pMD, LoadLibErrorTracker *pErrorTracker);
-
+    static LPVOID NDirectGetEntryPoint(NDirectMethodDesc *pMD, NATIVE_LIBRARY_HANDLE hMod);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryFromPath(LPCWSTR libraryPath, BOOL throwOnError);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryByName(LPCWSTR name, Assembly *callingAssembly, 
+                                                   BOOL hasDllImportSearchPathFlags, DWORD dllImportSearchPathFlags, 
+                                                   BOOL throwOnError);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModule(NDirectMethodDesc * pMD, LoadLibErrorTracker *pErrorTracker);
+    static void FreeNativeLibrary(NATIVE_LIBRARY_HANDLE handle);
+    static INT_PTR GetNativeLibraryExport(NATIVE_LIBRARY_HANDLE handle, LPCWSTR symbolName, BOOL throwOnError);
 
     static VOID NDirectLink(NDirectMethodDesc *pMD);
 
@@ -121,10 +122,13 @@ public:
 private:
     NDirect() {LIMITED_METHOD_CONTRACT;};     // prevent "new"'s on this class
 
-    static HMODULE LoadFromNativeDllSearchDirectories(AppDomain* pDomain, LPCWSTR libName, DWORD flags, LoadLibErrorTracker *pErrorTracker);
-    static HMODULE LoadFromPInvokeAssemblyDirectory(Assembly *pAssembly, LPCWSTR libName, DWORD flags, LoadLibErrorTracker *pErrorTracker);
-
-    static HMODULE LoadLibraryModuleViaHost(NDirectMethodDesc * pMD, AppDomain* pDomain, const wchar_t* wszLibName);
+    static NATIVE_LIBRARY_HANDLE LoadFromNativeDllSearchDirectories(LPCWSTR libName, DWORD flags, LoadLibErrorTracker *pErrorTracker);
+    static NATIVE_LIBRARY_HANDLE LoadFromPInvokeAssemblyDirectory(Assembly *pAssembly, LPCWSTR libName, DWORD flags, LoadLibErrorTracker *pErrorTracker);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModuleViaHost(NDirectMethodDesc * pMD, LPCWSTR wszLibName);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModuleViaEvent(NDirectMethodDesc * pMD, LPCWSTR wszLibName);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModuleViaCallback(NDirectMethodDesc * pMD, LPCWSTR wszLibName);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModuleBySearch(NDirectMethodDesc * pMD, LoadLibErrorTracker * pErrorTracker, LPCWSTR wszLibName);
+    static NATIVE_LIBRARY_HANDLE LoadLibraryModuleBySearch(Assembly *callingAssembly, BOOL searchAssemblyDirectory, DWORD dllImportSearchPathFlags, LoadLibErrorTracker * pErrorTracker, LPCWSTR wszLibName);
 
 #if !defined(FEATURE_PAL)
     // Indicates if the OS supports the new secure LoadLibraryEx flags introduced in KB2533623
@@ -467,9 +471,6 @@ public:
     void    EmitObjectValidation(ILCodeStream* pcsEmit, DWORD dwStubFlags);
 #endif // VERIFY_HEAP
     void    EmitLoadStubContext(ILCodeStream* pcsEmit, DWORD dwStubFlags);
-#ifdef MDA_SUPPORTED
-    void    EmitCallGcCollectForMDA(ILCodeStream *pcsEmit, DWORD dwStubFlags);
-#endif // MDA_SUPPORTED    
     void    GenerateInteropParamException(ILCodeStream* pcsEmit);
     void    NeedsCleanupList();
 
@@ -490,6 +491,10 @@ public:
 
     void    SetInteropParamExceptionInfo(UINT resID, UINT paramIdx);
     bool    HasInteropParamExceptionInfo();
+    bool    TargetHasThis()
+    {
+        return m_targetHasThis == TRUE;
+    }
 
     void ClearCode();
 
@@ -552,6 +557,7 @@ protected:
     BOOL                m_fHasCleanupCode;
     BOOL                m_fHasExceptionCleanupCode;
     BOOL                m_fCleanupWorkListIsSetup;
+    BOOL                m_targetHasThis;
     DWORD               m_dwThreadLocalNum;                 // managed-to-native only
     DWORD               m_dwArgMarshalIndexLocalNum;
     DWORD               m_dwCleanupWorkListLocalNum;

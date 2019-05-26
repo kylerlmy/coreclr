@@ -11,6 +11,29 @@
 
 #ifdef FEATURE_PERFTRACING
 
+EventPipeProviderCallbackDataQueue::EventPipeProviderCallbackDataQueue()
+{
+}
+
+void EventPipeProviderCallbackDataQueue::Enqueue(EventPipeProviderCallbackData* pEventPipeProviderCallbackData)
+{
+    SListElem<EventPipeProviderCallbackData>* listnode = new SListElem<EventPipeProviderCallbackData>(); // throws
+    listnode->m_Value = *pEventPipeProviderCallbackData;
+    this->list.InsertTail(listnode);
+}
+
+bool EventPipeProviderCallbackDataQueue::TryDequeue(EventPipeProviderCallbackData* pEventPipeProviderCallbackData)
+{
+    if (this->list.IsEmpty())
+    {
+        return false;
+    }
+    SListElem<EventPipeProviderCallbackData>* listnode = this->list.RemoveHead();
+    *pEventPipeProviderCallbackData = listnode->m_Value;
+    delete listnode;
+    return true;
+}
+
 EventPipeProvider::EventPipeProvider(EventPipeConfiguration *pConfig, const SString &providerName, EventPipeCallback pCallbackFunction, void *pCallbackData)
 {
     CONTRACTL
@@ -111,7 +134,7 @@ bool EventPipeProvider::EventEnabled(INT64 keywords, EventPipeEventLevel eventLe
         ((eventLevel == EventPipeEventLevel::LogAlways) || (m_providerLevel >= eventLevel)));
 }
 
-void EventPipeProvider::SetConfiguration(bool providerEnabled, INT64 keywords, EventPipeEventLevel providerLevel)
+EventPipeProviderCallbackData EventPipeProvider::SetConfiguration(bool providerEnabled, INT64 keywords, EventPipeEventLevel providerLevel, LPCWSTR pFilterData)
 {
     CONTRACTL
     {
@@ -127,20 +150,7 @@ void EventPipeProvider::SetConfiguration(bool providerEnabled, INT64 keywords, E
     m_providerLevel = providerLevel;
 
     RefreshAllEvents();
-    InvokeCallback();
-}
-
-EventPipeEvent* EventPipeProvider::AddEvent(unsigned int eventID, INT64 keywords, unsigned int eventVersion, EventPipeEventLevel level, BYTE *pMetadata, unsigned int metadataLength)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    return AddEvent(eventID, keywords, eventVersion, level, true /* needStack */, pMetadata, metadataLength);
+    return PrepareCallbackData(pFilterData);
 }
 
 EventPipeEvent* EventPipeProvider::AddEvent(unsigned int eventID, INT64 keywords, unsigned int eventVersion, EventPipeEventLevel level, bool needStack, BYTE *pMetadata, unsigned int metadataLength)
@@ -186,7 +196,66 @@ void EventPipeProvider::AddEvent(EventPipeEvent &event)
     event.RefreshState();
 }
 
-void EventPipeProvider::InvokeCallback()
+/* static */ void EventPipeProvider::InvokeCallback(EventPipeProviderCallbackData eventPipeProviderCallbackData)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        MODE_ANY;
+        PRECONDITION(!EventPipe::GetLock()->OwnedByCurrentThread());
+    }
+    CONTRACTL_END;
+
+    LPCWSTR pFilterData = eventPipeProviderCallbackData.pFilterData;
+    EventPipeCallback pCallbackFunction = eventPipeProviderCallbackData.pCallbackFunction;
+    bool enabled = eventPipeProviderCallbackData.enabled;
+    INT64 keywords = eventPipeProviderCallbackData.keywords;
+    EventPipeEventLevel providerLevel = eventPipeProviderCallbackData.providerLevel;
+    void* pCallbackData = eventPipeProviderCallbackData.pCallbackData;
+
+    bool isEventFilterDescriptorInitialized = false;
+    EventFilterDescriptor eventFilterDescriptor{};
+    CQuickArrayBase<char> buffer;
+    buffer.Init();
+
+    if (pFilterData != NULL)
+    {
+        // The callback is expecting that filter data to be a concatenated list
+        // of pairs of null terminated strings. The first member of the pair is
+        // the key and the second is the value.
+        // To convert to this format we need to convert all '=' and ';'
+        // characters to '\0'.
+        SString dstBuffer;
+        SString(pFilterData).ConvertToUTF8(dstBuffer);
+
+        const COUNT_T BUFFER_SIZE = dstBuffer.GetCount() + 1;
+        buffer.AllocThrows(BUFFER_SIZE);
+        for (COUNT_T i = 0; i < BUFFER_SIZE; ++i)
+            buffer[i] = (dstBuffer[i] == '=' || dstBuffer[i] == ';') ? '\0' : dstBuffer[i];
+
+        eventFilterDescriptor.Ptr = reinterpret_cast<ULONGLONG>(buffer.Ptr());
+        eventFilterDescriptor.Size = static_cast<ULONG>(BUFFER_SIZE);
+        eventFilterDescriptor.Type = 0; // EventProvider.cs: `internal enum ControllerCommand.Update`
+        isEventFilterDescriptorInitialized = true;
+    }
+
+    if(pCallbackFunction != NULL && !g_fEEShutDown)
+    {
+        (*pCallbackFunction)(
+            NULL, /* providerId */
+            enabled,
+            (UCHAR) providerLevel,
+            keywords,
+            0 /* matchAllKeywords */,
+            isEventFilterDescriptorInitialized ? &eventFilterDescriptor : NULL,
+            pCallbackData /* CallbackContext */);
+    }
+
+    buffer.Destroy();
+}
+
+EventPipeProviderCallbackData EventPipeProvider::PrepareCallbackData(LPCWSTR pFilterData)
 {
     CONTRACTL
     {
@@ -197,17 +266,14 @@ void EventPipeProvider::InvokeCallback()
     }
     CONTRACTL_END;
 
-    if(m_pCallbackFunction != NULL && !g_fEEShutDown)
-    {
-        (*m_pCallbackFunction)(
-            NULL, /* providerId */
-            m_enabled,
-            (UCHAR) m_providerLevel,
-            m_keywords,
-            0 /* matchAllKeywords */,
-            NULL /* FilterData */,
-            m_pCallbackData /* CallbackContext */);
-    }
+    EventPipeProviderCallbackData result;
+    result.pFilterData = pFilterData;
+    result.pCallbackFunction = m_pCallbackFunction;
+    result.enabled = m_enabled;
+    result.providerLevel = m_providerLevel;
+    result.keywords = m_keywords;
+    result.pCallbackData = m_pCallbackData;
+    return result;
 }
 
 bool EventPipeProvider::GetDeleteDeferred() const

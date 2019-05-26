@@ -59,6 +59,15 @@ class Program
          var iface = (IMyInterface)o;
          Assert.AreEqual(iface.InterfaceMethod(" "), "Interface result");
          Assert.AreEqual(MyClass.TestInterfaceMethod(iface, "+"), "Interface+result");
+
+        // V2 adds override of ToString
+        if (typeof(MyStructWithVirtuals).GetMethod("ToString").DeclaringType == typeof(MyStructWithVirtuals))
+        {
+            // Make sure the constrained call to ToString doesn't box
+            var mystruct = new MyStructWithVirtuals();
+            mystruct.ToString();
+            Assert.AreEqual(mystruct.X, "Overriden");
+        }
     }
 
     static void TestMovedVirtualMethods()
@@ -331,7 +340,9 @@ class Program
 #if CORECLR
     class MyLoadContext : AssemblyLoadContext
     {
-        public MyLoadContext()
+        // If running in a collectible context, make the MyLoadContext collectible too so that it doesn't prevent
+        // unloading.
+        public MyLoadContext() : base(AssemblyLoadContext.GetLoadContext(Assembly.GetExecutingAssembly()).IsCollectible)
         {
         }
 
@@ -415,6 +426,13 @@ class Program
         }
     }
 
+    static void RVAFieldTest()
+    {
+        ReadOnlySpan<byte> value = new byte[] { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+        for (byte i = 0; i < value.Length; i++)
+            Assert.AreEqual(value[i], (byte)(9 - i));
+    }
+
     static void RunAllTests()
     {
         TestVirtualMethodCalls();
@@ -467,6 +485,8 @@ class Program
         TestOpenClosedDelegate();
         
         GenericLdtokenFieldsTest();
+
+        RVAFieldTest();
     }
 
     static int Main()

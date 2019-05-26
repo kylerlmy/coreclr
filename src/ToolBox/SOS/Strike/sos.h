@@ -475,6 +475,11 @@ namespace sos
         {
             return (void*)!mDone;
         }
+
+        bool IsLoaderAllocator() const
+        {
+            return mLoaderAllocatorObjectHandle == mCurr;
+        }
         
     private:
         void Init();
@@ -746,6 +751,8 @@ namespace sos
          *   DataRead
          */
         GCHeap();
+
+        ~GCHeap();
 
         /* Returns an ObjectIterator which allows you to walk the objects on the managed heap.
          * This ObjectIterator is valid for the duration of the GCHeap's lifetime.  Note that

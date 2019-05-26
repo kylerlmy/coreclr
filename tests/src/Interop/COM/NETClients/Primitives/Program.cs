@@ -10,12 +10,19 @@ namespace NetClient
     {
         static int Main(string[] doNotUse)
         {
+            // RegFree COM is not supported on Windows Nano
+            if (TestLibrary.Utilities.IsWindowsNanoServer)
+            {
+                return 100;
+            }
+
             try
             {
                 new NumericTests().Run();
                 new ArrayTests().Run();
                 new StringTests().Run();
                 new ErrorTests().Run();
+                new ColorTests().Run();
             }
             catch (Exception e)
             {

@@ -31,10 +31,9 @@
 #endif // FEATURE_PREJIT
 
 // Forward refernces
-class EEClassLayoutInfo;
 class FieldDesc;
 class MethodTable;
-
+class FieldMarshaler;
 class FieldMarshaler_NestedLayoutClass;
 class FieldMarshaler_NestedValueClass;
 class FieldMarshaler_StringUni;
@@ -54,9 +53,9 @@ class FieldMarshaler_WinBool;
 class FieldMarshaler_CBool;
 class FieldMarshaler_Decimal;
 class FieldMarshaler_Date;
+class FieldMarshaler_BSTR;
 #ifdef FEATURE_COMINTEROP
 class FieldMarshaler_SafeArray;
-class FieldMarshaler_BSTR;
 class FieldMarshaler_HSTRING;
 class FieldMarshaler_Interface;
 class FieldMarshaler_Variant;
@@ -66,8 +65,6 @@ class FieldMarshaler_SystemType;
 class FieldMarshaler_Exception;
 class FieldMarshaler_Nullable;
 #endif // FEATURE_COMINTEROP
-
-VOID NStructFieldTypeToString(FieldMarshaler* pFM, SString& strNStructFieldType);
 
 //=======================================================================
 // Each possible COM+/Native pairing of data type has a
@@ -90,31 +87,51 @@ enum NStructFieldType
 //=======================================================================
 #define DEFAULT_PACKING_SIZE 32
 
+enum class ParseNativeTypeFlags : int
+{
+    None    = 0x00,
+    IsAnsi  = 0x01,
+#ifdef FEATURE_COMINTEROP
+    IsWinRT = 0x02,
+#endif // FEATURE_COMINTEROP
+};
 
-//=======================================================================
-// This is invoked from the class loader while building the data structures for a type.
-// This function checks if explicit layout metadata exists.
-//
-// Returns:
-//  TRUE    - yes, there's layout metadata
-//  FALSE   - no, there's no layout.
-//  fail    - throws a typeload exception
-//
-// If S_OK,
-//   *pNLType            gets set to nltAnsi or nltUnicode
-//   *pPackingSize       declared packing size
-//   *pfExplicitoffsets  offsets explicit in metadata or computed?
-//=======================================================================
-BOOL HasLayoutMetadata(Assembly* pAssembly, IMDInternalImport *pInternalImport, mdTypeDef cl, 
-                            MethodTable *pParentMT, BYTE *pPackingSize, BYTE *pNLTType,
-                            BOOL *pfExplicitOffsets);
+VOID ParseNativeType(Module*    pModule,
+    PCCOR_SIGNATURE             pCOMSignature,
+    DWORD                       cbCOMSignature,
+    ParseNativeTypeFlags        flags,
+    LayoutRawFieldInfo*         pfwalk,
+    PCCOR_SIGNATURE             pNativeType,
+    ULONG                       cbNativeType,
+    mdTypeDef                   cl,
+    const SigTypeContext *      pTypeContext,
+    BOOL                       *pfDisqualifyFromManagedSequential
+#ifdef _DEBUG
+    ,
+    LPCUTF8                     szNamespace,
+    LPCUTF8                     szClassName,
+    LPCUTF8                     szFieldName
+#endif
+);
 
+BOOL IsFieldBlittable(FieldMarshaler* pFM);
 
 //=======================================================================
 // This function returns TRUE if the type passed in is either a value class or a class and if it has layout information 
 // and is marshalable. In all other cases it will return FALSE. 
 //=======================================================================
 BOOL IsStructMarshalable(TypeHandle th);
+
+//=======================================================================
+// This structure contains information about where a field is placed in a structure, as well as it's size and alignment.
+// It is used as part of type-loading to determine native layout and (where applicable) managed sequential layout.
+//=======================================================================
+struct RawFieldPlacementInfo
+{
+    UINT32 m_offset;
+    UINT32 m_size;
+    UINT32 m_alignment;
+};
 
 //=======================================================================
 // The classloader stores an intermediate representation of the layout
@@ -126,34 +143,24 @@ BOOL IsStructMarshalable(TypeHandle th);
 //
 // Each redirected field gets one entry in LayoutRawFieldInfo.
 // The array is terminated by one dummy record whose m_MD == mdMemberDefNil.
-// WARNING!! Before you change this struct see the comment above the m_FieldMarshaler field
 //=======================================================================
 struct LayoutRawFieldInfo
 {
     mdFieldDef  m_MD;             // mdMemberDefNil for end of array
     UINT8       m_nft;            // NFT_* value
-    UINT32      m_offset;         // native offset of field
-    UINT32      m_cbNativeSize;   // native size of field in bytes
+    RawFieldPlacementInfo m_nativePlacement; // Description of the native field placement
     ULONG       m_sequence;       // sequence # from metadata
-    BOOL        m_fIsOverlapped;
 
 
-    //----- Post v1.0 addition: The LayoutKind.Sequential attribute now affects managed layout as well.
-    //----- So we need to keep a parallel set of layout data for the managed side. The Size and AlignmentReq
-    //----- is redundant since we can figure it out from the sig but since we're already accessing the sig
-    //----- in ParseNativeType, we might as well capture it at that time.
-    UINT32      m_managedSize;    // managed size of field
-    UINT32      m_managedAlignmentReq; // natural alignment of field
-    UINT32      m_managedOffset;  // managed offset of field
-    UINT32      m_pad;            // needed to keep m_FieldMarshaler 8-byte aligned
+    // The LayoutKind.Sequential attribute now affects managed layout as well.
+    // So we need to keep a parallel set of layout data for the managed side. The Size and AlignmentReq
+    // is redundant since we can figure it out from the sig but since we're already accessing the sig
+    // in ParseNativeType, we might as well capture it at that time.
+    RawFieldPlacementInfo m_managedPlacement;
 
-    // WARNING!
-    // We in-place create a field marshaler in the following
-    // memory, so keep it 8-byte aligned or 
-    // the vtable pointer initialization will cause a 
-    // misaligned memory write on IA64.
-    // The entire struct's size must also be multiple of 8 bytes
-    struct
+    // This field is needs to be 8-byte aligned
+    // to ensure that the FieldMarshaler vtable pointer is aligned correctly.
+    alignas(8) struct
     {
         private:
             char m_space[MAXFIELDMARSHALERSIZE];
@@ -396,7 +403,6 @@ public:
             NOTHROW;
             GC_NOTRIGGER;
             MODE_ANY;
-            SO_TOLERANT;
             POSTCONDITION(CheckPointer(RETVAL, NULL_OK));
         }
         CONTRACT_END;
@@ -459,15 +465,11 @@ protected:
     }
 #endif // _DEBUG
 
-
     RelativeFixupPointer<PTR_FieldDesc> m_pFD;      // FieldDesc
     UINT32           m_dwExternalOffset;    // offset of field in the fixed portion
     NStructFieldType m_nft;
 };
 
-
-
-#ifdef FEATURE_COMINTEROP
 
 //=======================================================================
 // BSTR <--> System.String
@@ -484,6 +486,7 @@ public:
     COPY_TO_IMPL_BASE_STRUCT_ONLY()
 };
 
+#ifdef FEATURE_COMINTEROP
 //=======================================================================
 // HSTRING <--> System.String
 //=======================================================================
@@ -712,10 +715,17 @@ private:
 class FieldMarshaler_NestedValueClass : public FieldMarshaler
 {
 public:
+#ifndef _DEBUG
     FieldMarshaler_NestedValueClass(MethodTable *pMT)
+#else
+    FieldMarshaler_NestedValueClass(MethodTable *pMT, BOOL isFixedBuffer)
+#endif
     {
         WRAPPER_NO_CONTRACT;
         m_pNestedMethodTable.SetValueMaybeNull(pMT);
+#ifdef _DEBUG
+        m_isFixedBuffer = isFixedBuffer;
+#endif
     }
 
     BOOL IsNestedValueClassMarshalerImpl() const
@@ -763,6 +773,9 @@ public:
     START_COPY_TO_IMPL(FieldMarshaler_NestedValueClass)
     {
         pDestFieldMarshaller->m_pNestedMethodTable.SetValueMaybeNull(GetMethodTable());
+#ifdef _DEBUG
+        pDestFieldMarshaller->m_isFixedBuffer = m_isFixedBuffer;
+#endif
     }
     END_COPY_TO_IMPL(FieldMarshaler_NestedValueClass)
 
@@ -795,10 +808,20 @@ public:
         return m_pNestedMethodTable.GetValueMaybeNull();
     }
 
+#ifdef _DEBUG
+    BOOL IsFixedBuffer() const
+    {
+        return m_isFixedBuffer;
+    }
+#endif
+
 
 private:
     // MethodTable of nested NStruct.
     RelativeFixupPointer<PTR_MethodTable> m_pNestedMethodTable;
+#ifdef _DEBUG
+    BOOL m_isFixedBuffer;
+#endif
 };
 
 
@@ -1000,7 +1023,7 @@ private:
 class FieldMarshaler_FixedArray : public FieldMarshaler
 {
 public:
-    FieldMarshaler_FixedArray(IMDInternalImport *pMDImport, mdTypeDef cl, UINT32 numElems, VARTYPE vt, MethodTable* pElementMT);
+    FieldMarshaler_FixedArray(Module *pModule, mdTypeDef cl, UINT32 numElems, VARTYPE vt, MethodTable* pElementMT);
 
     VOID UpdateNativeImpl(OBJECTREF* pCLRValue, LPVOID pNativeValue, OBJECTREF *ppCleanupWorkListOnStack) const;
     VOID UpdateCLRImpl(const VOID *pNativeValue, OBJECTREF *ppProtectedCLRValue, OBJECTREF *ppProtectedOldCLRValue) const;
@@ -1011,8 +1034,19 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
 
-        MethodTable *pElementMT = m_arrayType.GetValue().AsArray()->GetArrayElementTypeHandle().GetMethodTable();
-        return OleVariant::GetElementSizeForVarType(m_vt, pElementMT) * m_numElems;
+        return OleVariant::GetElementSizeForVarType(m_vt, GetElementMethodTable()) * m_numElems;
+    }
+
+    UINT32 GetNumElements() const
+    {
+        LIMITED_METHOD_CONTRACT;
+        
+        return m_numElems;
+    }
+
+    MethodTable* GetElementMethodTable() const
+    {
+        return GetElementTypeHandle().GetMethodTable();
     }
 
     TypeHandle GetElementTypeHandle() const
@@ -1083,7 +1117,8 @@ public:
 #ifdef FEATURE_PREJIT
         return !m_arrayType.IsTagged() && (m_arrayType.IsNull() || m_arrayType.GetValue().IsRestored());
 #else // FEATURE_PREJIT
-        return m_arrayType.IsNull() || m_arrayType.GetValue().IsFullyLoaded();
+        // putting the IsFullyLoaded check here is tempting but incorrect
+        return TRUE;
 #endif // FEATURE_PREJIT
     }
 #endif

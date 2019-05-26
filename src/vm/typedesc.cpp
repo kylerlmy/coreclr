@@ -25,8 +25,6 @@
 #include "compile.h"
 #endif
 #include "array.h"
-#include "stackprobe.h"
-
 
 #ifndef DACCESS_COMPILE
 #ifdef _DEBUG
@@ -107,12 +105,10 @@ PTR_Module TypeDesc::GetLoaderModule()
 
         _ASSERTE(GetInternalCorElementType() == ELEMENT_TYPE_FNPTR);
         PTR_FnPtrTypeDesc asFnPtr = dac_cast<PTR_FnPtrTypeDesc>(this);
-        BEGIN_SO_INTOLERANT_CODE_NOTHROW(GetThread(), fFail = TRUE );
         if (!fFail)
         {
-            retVal =  ClassLoader::ComputeLoaderModuleForFunctionPointer(asFnPtr->GetRetAndArgTypesPointer(), asFnPtr->GetNumArgs()+1);
+            retVal = ClassLoader::ComputeLoaderModuleForFunctionPointer(asFnPtr->GetRetAndArgTypesPointer(), asFnPtr->GetNumArgs()+1);
         }                                              
-        END_SO_INTOLERANT_CODE;
         return retVal;
     }
 }
@@ -136,25 +132,7 @@ PTR_BaseDomain TypeDesc::GetDomain()
     }
     CONTRACTL_END
 
-    Module *pZapModule = GetZapModule();
-    if (pZapModule != NULL)
-    {
-        return pZapModule->GetDomain();
-    }
-
-    if (HasTypeParam())
-    {
-        return GetBaseTypeParam().GetDomain();
-    }
-    if (IsGenericVariable())
-    {
-        PTR_TypeVarTypeDesc asVar = dac_cast<PTR_TypeVarTypeDesc>(this);
-        return asVar->GetModule()->GetDomain();
-    }
-    _ASSERTE(GetInternalCorElementType() == ELEMENT_TYPE_FNPTR);
-    PTR_FnPtrTypeDesc asFnPtr = dac_cast<PTR_FnPtrTypeDesc>(this);
-    return BaseDomain::ComputeBaseDomain(asFnPtr->GetRetAndArgTypesPointer()[0].GetDomain(),
-                                         Instantiation(asFnPtr->GetRetAndArgTypesPointer(), asFnPtr->GetNumArgs()+1));
+    return dac_cast<PTR_BaseDomain>(AppDomain::GetCurrentDomain());
 }
 
 PTR_Module TypeDesc::GetModule() {
@@ -163,7 +141,6 @@ PTR_Module TypeDesc::GetModule() {
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
         SUPPORTS_DAC;
         // Function pointer types belong to no module
         //PRECONDITION(GetInternalCorElementType() != ELEMENT_TYPE_FNPTR);
@@ -187,19 +164,6 @@ PTR_Module TypeDesc::GetModule() {
     _ASSERTE(GetInternalCorElementType() == ELEMENT_TYPE_FNPTR);
 
     return GetLoaderModule();
-}
-
-BOOL TypeDesc::IsDomainNeutral()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        FORBID_FAULT;
-    }
-    CONTRACTL_END
-
-    return GetDomain()->IsSharedDomain();
 }
 
 BOOL ParamTypeDesc::OwnsTemplateMethodTable()
@@ -572,7 +536,6 @@ TypeHandle::CastResult TypeDesc::CanCastToNoGC(TypeHandle toType)
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -664,7 +627,6 @@ TypeHandle::CastResult TypeDesc::CanCastParamNoGC(TypeHandle fromParam, TypeHand
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -739,7 +701,6 @@ BOOL TypeDesc::IsEquivalentTo(TypeHandle type COMMA_INDEBUG(TypeHandlePairList *
         THROWS;
         GC_TRIGGERS;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -835,7 +796,7 @@ OBJECTREF ParamTypeDesc::GetManagedClassObject()
         EnsureWritablePages(this);
         if (FastInterlockCompareExchangePointer(&m_hExposedClassObject, hExposedClassObject, static_cast<LOADERHANDLE>(NULL)))
         {
-            pLoaderAllocator->ClearHandle(hExposedClassObject);
+            pLoaderAllocator->FreeHandle(hExposedClassObject);
         }
 
         if (OwnsTemplateMethodTable())
@@ -2271,7 +2232,7 @@ OBJECTREF TypeVarTypeDesc::GetManagedClassObject()
 
         if (FastInterlockCompareExchangePointer(EnsureWritablePages(&m_hExposedClassObject), hExposedClassObject, static_cast<LOADERHANDLE>(NULL)))
         {
-            pLoaderAllocator->ClearHandle(hExposedClassObject);
+            pLoaderAllocator->FreeHandle(hExposedClassObject);
         }
 
         GCPROTECT_END();

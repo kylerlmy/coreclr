@@ -121,18 +121,18 @@ LEAF_END HelperMethodFrameRestoreState, _TEXT
 // The call in ndirect import precode points to this function.
 NESTED_ENTRY NDirectImportThunk, _TEXT, NoHandler
 
-    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -160
+    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -224
     SAVE_ARGUMENT_REGISTERS sp, 16
-    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 88
+    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 96
 
     mov x0, x12
     bl NDirectImportWorker
     mov x12, x0
 
     // pop the stack and restore original register state
-    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 88
+    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 96
     RESTORE_ARGUMENT_REGISTERS sp, 16
-    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 160
+    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 224
 
     // If we got back from NDirectImportWorker, the MD has been successfully
     // linked. Proceed to execute the original DLL call.
@@ -344,8 +344,14 @@ WRITE_BARRIER_ENTRY JIT_CheckedWriteBarrier
     cmp  x14,  x12
 
     ldr  x12, LOCAL_LABEL(wbs_highest_address)
-    ccmp x14, x12, #0x0, ge
-    blt  C_FUNC(JIT_WriteBarrier)
+
+    // Compare against the upper bound if the previous comparison indicated
+    // that the destination address is greater than or equal to the lower
+    // bound. Otherwise, set the C flag (specified by the 0x2) so that the
+    // branch below is not taken.
+    ccmp x14, x12, #0x2, hs
+
+    blo  C_FUNC(JIT_WriteBarrier)
 
 LOCAL_LABEL(NotInHeap):
     str  x15, [x14], 8
@@ -429,7 +435,13 @@ LOCAL_LABEL(CheckCardTable):
     cmp  x15,  x12
 
     ldr  x12, LOCAL_LABEL(wbs_ephemeral_high)
-    ccmp x15, x12, 0x0, hs
+
+    // Compare against the upper bound if the previous comparison indicated
+    // that the destination address is greater than or equal to the lower
+    // bound. Otherwise, set the C flag (specified by the 0x2) so that the
+    // branch to exit is taken.
+    ccmp x15, x12, #0x2, hs
+
     bhi  LOCAL_LABEL(Exit)
 
 LOCAL_LABEL(SkipEphemeralCheck):
@@ -462,6 +474,7 @@ LOCAL_LABEL(Exit):
     ret  lr  
 WRITE_BARRIER_END JIT_WriteBarrier
 
+#ifdef FEATURE_PREJIT
 //------------------------------------------------
 // VirtualMethodFixupStub
 //
@@ -481,9 +494,9 @@ WRITE_BARRIER_END JIT_WriteBarrier
 NESTED_ENTRY VirtualMethodFixupStub, _TEXT, NoHandler
 
     // Save arguments and return address
-    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -160
+    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -224
     SAVE_ARGUMENT_REGISTERS sp, 16
-    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 88
+    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 96
 
     // Refer to ZapImportVirtualThunk::Save
     // for details on this.
@@ -500,15 +513,16 @@ NESTED_ENTRY VirtualMethodFixupStub, _TEXT, NoHandler
 
     // pop the stack and restore original register state
     RESTORE_ARGUMENT_REGISTERS sp, 16
-    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 88
-    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 160
+    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 96
+    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 224
 
     PATCH_LABEL VirtualMethodFixupPatchLabel
 
     // and tailcall to the actual method
     EPILOG_BRANCH_REG x12
 
-NESTED_END VirtualMEthodFixupStub, _TEXT
+NESTED_END VirtualMethodFixupStub, _TEXT
+#endif // FEATURE_PREJIT
 
 //------------------------------------------------
 // ExternalMethodFixupStub
@@ -711,9 +725,9 @@ COMToCLRDispatchHelper_RegSetup
 NESTED_ENTRY TheUMEntryPrestub, _TEXT, UnhandledExceptionHandlerUnix
 
     // Save arguments and return address
-    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -160
+    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -224
     SAVE_ARGUMENT_REGISTERS sp, 16
-    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 88
+    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 96
 
     mov x0, x12
     bl C_FUNC(TheUMEntryPrestubWorker)
@@ -723,8 +737,8 @@ NESTED_ENTRY TheUMEntryPrestub, _TEXT, UnhandledExceptionHandlerUnix
 
     // pop the stack and restore original register state
     RESTORE_ARGUMENT_REGISTERS sp, 16
-    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 88
-    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 160
+    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 96
+    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 224
 
     // and tailcall to the actual method
     EPILOG_BRANCH_REG x12
@@ -767,15 +781,6 @@ LOCAL_LABEL(UMThunkStub_HaveThread):
 
 LOCAL_LABEL(UMThunkStub_InCooperativeMode):
     ldr x12, [fp, #UMThunkStub_HiddenArg] // x12 = UMEntryThunk*
-
-    ldr x0, [x19, #Thread__m_pDomain]
-
-    // m_dwDomainId is 4 bytes so using 32-bit variant
-    ldr w1, [x12, #UMEntryThunk__m_dwDomainId]
-    ldr w0, [x0, #AppDomain__m_dwId]
-    cmp w0, w1
-    bne LOCAL_LABEL(UMThunkStub_WrongAppDomain)
-
     ldr x3, [x12, #UMEntryThunk__m_pUMThunkMarshInfo] // x3 = m_pUMThunkMarshInfo
 
     // m_cbActualArgSize is UINT32 and hence occupies 4 bytes
@@ -846,117 +851,13 @@ LOCAL_LABEL(UMThunkStub_DoTrapReturningThreads):
     add sp, sp, #SIZEOF__FloatArgumentRegisters
     b LOCAL_LABEL(UMThunkStub_InCooperativeMode)
 
-LOCAL_LABEL(UMThunkStub_WrongAppDomain):
-    // Saving FP Args as this is read by UM2MThunk_WrapperHelper
-    sub sp, sp, #SIZEOF__FloatArgumentRegisters
-    SAVE_FLOAT_ARGUMENT_REGISTERS sp, 0
-
-    // UMEntryThunk* pUMEntry
-    ldr x0, [fp, #UMThunkStub_HiddenArg]
-
-    // void * pArgs
-    add x2, fp, #16  
-
-    // remaining arguments are unused
-    bl C_FUNC(UM2MDoADCallBack)
-
-    // restore integral return value
-    ldp x0, x1, [fp, #16]
-
-    // restore FP or HFA return value
-    RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 0
-
-    b LOCAL_LABEL(UMThunkStub_PostCall)
-
 NESTED_END UMThunkStub, _TEXT
-
-
-// UM2MThunk_WrapperHelper(void *pThunkArgs, // x0
-//                         int cbStackArgs,  // x1 (unused)
-//                         void *pAddr,  // x2 (unused)
-//                         UMEntryThunk *pEntryThunk,// x3
-//                         Thread *pThread)  // x4
-
-// pThunkArgs points to the argument registers pushed on the stack by UMThunkStub
-
-NESTED_ENTRY UM2MThunk_WrapperHelper, _TEXT, NoHandler
-
-    PROLOG_SAVE_REG_PAIR_INDEXED fp, lr, -32
-    PROLOG_SAVE_REG  x19, 16
-
-
-    // save pThunkArgs in non-volatile reg. It is required after return from call to ILStub
-    mov x19, x0  
-
-    // ARM64TODO - Is this required by ILStub
-    mov x12, x3  //// x12 = UMEntryThunk *
-
-    //
-    // Note that layout of the arguments is given by UMThunkStub frame
-    //
-    ldr x3, [x3, #UMEntryThunk__m_pUMThunkMarshInfo]
-
-    // m_cbActualArgSize is 4-byte field
-    ldr w2, [x3, #UMThunkMarshInfo__m_cbActualArgSize]
-    cbz w2, LOCAL_LABEL(UM2MThunk_WrapperHelper_RegArgumentsSetup)
-
-    // extend to 64- bits
-    uxtw x2, w2 
-
-    // Source pointer. Subtracting 16 bytes due to fp & lr
-    add x6, x0, #(UMThunkStub_StackArgs-16) 
-
-    // move source ptr to end of Stack Args
-    add x6, x6, x2 
-
-    // Count of stack slot pairs to copy (divide by 16)
-    lsr x1, x2, #4
-
-    // Is there an extra stack slot? (can happen when stack arg bytes not multiple of 16)
-    and x2, x2, #8
-
-    // If yes then start source pointer from 16 byte aligned stack slot
-    add x6, x6, x2
-
-    // increment stack slot pair count by 1 if x2 is not zero
-    add x1, x1, x2, LSR #3
-
-LOCAL_LABEL(UM2MThunk_WrapperHelper_StackLoop):
-    ldp x4, x5, [x6, #-16]!
-    stp x4, x5, [sp, #-16]!
-    subs x1, x1, #1
-    bne LOCAL_LABEL(UM2MThunk_WrapperHelper_StackLoop)
-
-LOCAL_LABEL(UM2MThunk_WrapperHelper_RegArgumentsSetup):
-    ldr x16, [x3, #(UMThunkMarshInfo__m_pILStub)]
-
-    // reload floating point registers
-    RESTORE_FLOAT_ARGUMENT_REGISTERS x0, -1 * (SIZEOF__FloatArgumentRegisters + 16)
-
-    // reload argument registers
-    RESTORE_ARGUMENT_REGISTERS x0, 0
-
-    blr x16
-
-    // save integral return value
-    stp x0, x1, [x19]
-
-    // save FP/HFA return values
-    SAVE_FLOAT_ARGUMENT_REGISTERS x19, -1 * (SIZEOF__FloatArgumentRegisters + 16)
-
-    EPILOG_STACK_RESTORE
-    EPILOG_RESTORE_REG  x19, 16
-    EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 32
-    EPILOG_RETURN
-
-NESTED_END UM2MThunk_WrapperHelper, _TEXT
-
 
 #ifdef FEATURE_HIJACK
 // ------------------------------------------------------------------
 // Hijack function for functions which return a scalar type or a struct (value type)
 NESTED_ENTRY OnHijackTripThread, _TEXT, NoHandler
-    PROLOG_SAVE_REG_PAIR_INDEXED   fp, lr, -144
+    PROLOG_SAVE_REG_PAIR_INDEXED   fp, lr, -176
     // Spill callee saved registers
     PROLOG_SAVE_REG_PAIR   x19, x20, 16
     PROLOG_SAVE_REG_PAIR   x21, x22, 32
@@ -968,8 +869,8 @@ NESTED_ENTRY OnHijackTripThread, _TEXT, NoHandler
     stp x0, x1, [sp, #96]
 
     // save any FP/HFA return value(s)
-    stp d0, d1, [sp, #112]
-    stp d2, d3, [sp, #128]
+    stp q0, q1, [sp, #112]
+    stp q2, q3, [sp, #144]
 
     mov x0, sp
     bl OnHijackWorker
@@ -978,15 +879,15 @@ NESTED_ENTRY OnHijackTripThread, _TEXT, NoHandler
     ldp x0, x1, [sp, #96]
 
     // restore any FP/HFA return value(s)
-    ldp d0, d1, [sp, #112]
-    ldp d2, d3, [sp, #128]
+    ldp q0, q1, [sp, #112]
+    ldp q2, q3, [sp, #144]
 
     EPILOG_RESTORE_REG_PAIR   x19, x20, 16
     EPILOG_RESTORE_REG_PAIR   x21, x22, 32
     EPILOG_RESTORE_REG_PAIR   x23, x24, 48
     EPILOG_RESTORE_REG_PAIR   x25, x26, 64
     EPILOG_RESTORE_REG_PAIR   x27, x28, 80
-    EPILOG_RESTORE_REG_PAIR_INDEXED   fp, lr,   144
+    EPILOG_RESTORE_REG_PAIR_INDEXED   fp, lr,   176
     EPILOG_RETURN
 NESTED_END OnHijackTripThread, _TEXT
 
@@ -1405,7 +1306,7 @@ LEAF_ENTRY JIT_Stelem_Ref, _TEXT
     beq     C_FUNC(JIT_Stelem_DoWrite)
 
     // Types didnt match but allow writing into an array of objects
-    ldr     x3, =g_pObjectClass
+    PREPARE_EXTERNAL_VAR g_pObjectClass, x3
     ldr     x3, [x3]  // x3 = *g_pObjectClass
     cmp     x3, x12   // array type matches with Object*
     beq     C_FUNC(JIT_Stelem_DoWrite)

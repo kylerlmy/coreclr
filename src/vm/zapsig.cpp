@@ -11,7 +11,6 @@
 
 
 #include "common.h"
-#ifdef FEATURE_PREJIT
 #include "zapsig.h"
 #include "typedesc.h"
 #include "compile.h"
@@ -566,6 +565,7 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
     RETURN(TRUE);
 }
 
+#ifdef FEATURE_PREJIT
 /*static*/
 BOOL ZapSig::CompareFixupToTypeHandle(Module * pModule, TADDR fixup, TypeHandle handle)
 {
@@ -588,6 +588,7 @@ BOOL ZapSig::CompareFixupToTypeHandle(Module * pModule, TADDR fixup, TypeHandle 
     ZapSig::Context zapSigContext(pDefiningModule, pModule);
     return ZapSig::CompareSignatureToTypeHandle(pSig, pDefiningModule, handle, &zapSigContext);
 }
+#endif // FEATURE_PREJIT
 
 /*static*/
 BOOL ZapSig::CompareTypeHandleFieldToTypeHandle(TypeHandle *pTypeHnd, TypeHandle typeHnd2)
@@ -607,6 +608,7 @@ BOOL ZapSig::CompareTypeHandleFieldToTypeHandle(TypeHandle *pTypeHnd, TypeHandle
     // Ensure that the compiler won't fetch the value twice
     SIZE_T fixup = VolatileLoadWithoutBarrier((SIZE_T *)pTypeHnd);
 
+#ifdef FEATURE_PREJIT
     if (CORCOMPILE_IS_POINTER_TAGGED(fixup))
     {
         Module *pContainingModule = ExecutionManager::FindZapModule(dac_cast<TADDR>(pTypeHnd));
@@ -624,13 +626,13 @@ BOOL ZapSig::CompareTypeHandleFieldToTypeHandle(TypeHandle *pTypeHnd, TypeHandle
         }
     }
     else
+#endif // FEATURE_PREJIT
         return TypeHandle::FromTAddr(fixup) == typeHnd2;
 }
 
 #ifndef DACCESS_COMPILE
-Module *ZapSig::DecodeModuleFromIndexes(Module *fromModule,
-                                        DWORD assemblyIndex,
-                                        DWORD moduleIndex)
+Module *ZapSig::DecodeModuleFromIndex(Module *fromModule,
+                                      DWORD index)
 {
     CONTRACTL
     {
@@ -642,71 +644,66 @@ Module *ZapSig::DecodeModuleFromIndexes(Module *fromModule,
 
     Assembly *pAssembly = NULL;
 
-    if (assemblyIndex == 0)
+    if (index == 0)
     {
         pAssembly = fromModule->GetAssembly();
     }
     else
     {
-        if (assemblyIndex < fromModule->GetAssemblyRefMax())
+        if (index < fromModule->GetAssemblyRefMax())
         {
-            pAssembly = fromModule->LoadAssembly(GetAppDomain(), RidToToken(assemblyIndex, mdtAssemblyRef))->GetAssembly();
+            pAssembly = fromModule->LoadAssembly(RidToToken(index, mdtAssemblyRef))->GetAssembly();
         }
         else
         {
-            assemblyIndex -= fromModule->GetAssemblyRefMax();
+            index -= fromModule->GetAssemblyRefMax();
 
-            pAssembly = fromModule->GetNativeMetadataAssemblyRefFromCache(assemblyIndex);
+            pAssembly = fromModule->GetNativeMetadataAssemblyRefFromCache(index);
 
             if(pAssembly == NULL)
             {
                 AssemblySpec spec;
-                spec.InitializeSpec(TokenFromRid(assemblyIndex, mdtAssemblyRef),
+                spec.InitializeSpec(TokenFromRid(index, mdtAssemblyRef),
                                     fromModule->GetNativeAssemblyImport(),
                                     NULL);
 
                 pAssembly = spec.LoadAssembly(FILE_LOADED);
 
-                fromModule->SetNativeMetadataAssemblyRefInCache(assemblyIndex, pAssembly);            
+                fromModule->SetNativeMetadataAssemblyRefInCache(index, pAssembly);            
             }
         }
     }
 
-    if (moduleIndex == 0)
-        return pAssembly->GetManifestModule();
-    else
-        return pAssembly->GetManifestModule()->LoadModule(GetAppDomain(), RidToToken(moduleIndex, mdtFile))->GetModule();
+    return pAssembly->GetManifestModule();
 }
 
-Module *ZapSig::DecodeModuleFromIndexesIfLoaded(Module *fromModule,
-                                                DWORD assemblyIndex,
-                                                DWORD moduleIndex)
+Module *ZapSig::DecodeModuleFromIndexIfLoaded(Module *fromModule,
+                                              DWORD index)
 {
     CONTRACTL
     {
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
     Assembly *pAssembly = NULL;
     mdAssemblyRef tkAssemblyRef;
 
-    if (assemblyIndex == 0)
+    if (index == 0)
         pAssembly = fromModule->GetAssembly();
     else
     {
-        if (assemblyIndex < fromModule->GetAssemblyRefMax())
+        if (index < fromModule->GetAssemblyRefMax())
         {
-            tkAssemblyRef = RidToToken(assemblyIndex, mdtAssemblyRef);
+            tkAssemblyRef = RidToToken(index, mdtAssemblyRef);
             pAssembly = fromModule->GetAssemblyIfLoaded(tkAssemblyRef);
         }
         else
         {
-            assemblyIndex -= fromModule->GetAssemblyRefMax();
-            tkAssemblyRef = RidToToken(assemblyIndex, mdtAssemblyRef);
+            index -= fromModule->GetAssemblyRefMax();
+            tkAssemblyRef = RidToToken(index, mdtAssemblyRef);
             IMDInternalImport *  pMDImportOverride = fromModule->GetNativeAssemblyImport(FALSE);
             if (pMDImportOverride != NULL)
             {
@@ -765,7 +762,7 @@ Module *ZapSig::DecodeModuleFromIndexesIfLoaded(Module *fromModule,
                         fValidAssemblyRef = FALSE;
                     }
                 }
-                
+
                 if (fValidAssemblyRef)
                 {
                     pAssembly = fromModule->GetAssemblyIfLoaded(
@@ -781,10 +778,7 @@ Module *ZapSig::DecodeModuleFromIndexesIfLoaded(Module *fromModule,
     if (pAssembly == NULL)
         return NULL;
 
-    if (moduleIndex == 0)
-        return pAssembly->GetManifestModule();
-    else
-        return pAssembly->GetManifestModule()->GetModuleIfLoaded(RidToToken(moduleIndex, mdtFile), TRUE, TRUE);
+    return pAssembly->GetManifestModule();
 }
 
 
@@ -811,11 +805,11 @@ TypeHandle ZapSig::DecodeType(Module *pEncodeModuleContext,
     TypeHandle th = p.GetTypeHandleThrowing(pInfoModule,
                                             &typeContext,
                                             ClassLoader::LoadTypes,
-                                            level,                                            
+                                            level,
                                             level < CLASS_LOADED, // For non-full loads, drop a level when loading generic arguments
                                             NULL,
                                             pZapSigContext);
-                                            
+
     return th;
 }
 
@@ -1135,16 +1129,29 @@ BOOL ZapSig::EncodeMethod(
     TypeHandle ownerType;
 
 #ifdef FEATURE_READYTORUN_COMPILER
-    if (IsReadyToRunCompilation())
-    {
-        if (pResolvedToken == NULL)
-        {
-            _ASSERTE(!"CORINFO_RESOLVED_TOKEN required to encode method!");
-            ThrowHR(E_FAIL);
-        }
 
-        // Encode the referencing method type
-        ownerType = TypeHandle(pResolvedToken->hClass);
+    // For methods encoded outside of the version bubble, we use pResolvedToken which describes the metadata token from which the method originated
+    // For tokens inside the version bubble we are not constrained by the contents of pResolvedToken and as such we skip this codepath
+    // Generic interfaces in canonical form are an exception, we need to get the real type from the pResolvedToken so that the lookup at runtime
+    // can find the type in interface map.
+    // FUTURE: This condition should likely be changed or reevaluated once support for smaller version bubbles is implemented.
+    if (IsReadyToRunCompilation() && (!IsLargeVersionBubbleEnabled() || !pMethod->GetModule()->IsInCurrentVersionBubble() || (pMethod->IsSharedByGenericInstantiations() && pMethod->IsInterface())))
+    {
+        if (pMethod->IsNDirect())
+        {
+            ownerType = pMethod->GetMethodTable_NoLogging();
+        }
+        else
+        {
+            if (pResolvedToken == NULL)
+            {
+                _ASSERTE(!"CORINFO_RESOLVED_TOKEN required to encode method!");
+                ThrowHR(E_FAIL);
+            }
+
+            // Encode the referencing method type
+            ownerType = TypeHandle(pResolvedToken->hClass);
+        }
     }
     else
 #endif
@@ -1194,14 +1201,17 @@ BOOL ZapSig::EncodeMethod(
     }
 
 #ifdef FEATURE_READYTORUN_COMPILER
-    if (IsReadyToRunCompilation())
+    if (IsReadyToRunCompilation() && (pConstrainedResolvedToken != NULL))
     {
-        if (pConstrainedResolvedToken != NULL)
-        {
-            methodFlags |= ENCODE_METHOD_SIG_Constrained;
-        }
+        methodFlags |= ENCODE_METHOD_SIG_Constrained;
+    }
 
-        Module * pReferencingModule = (Module *)pResolvedToken->tokenScope;
+    // FUTURE: This condition should likely be changed or reevaluated once support for smaller version bubbles is implemented.
+    if (IsReadyToRunCompilation() && (!IsLargeVersionBubbleEnabled() || !pMethod->GetModule()->IsInCurrentVersionBubble()))
+    {
+        Module * pReferencingModule = pMethod->IsNDirect() ?
+            pMethod->GetModule() :
+            (Module *)pResolvedToken->tokenScope;
 
         if (!pReferencingModule->IsInCurrentVersionBubble())
         {
@@ -1210,9 +1220,10 @@ BOOL ZapSig::EncodeMethod(
             // GetSvcLogger()->Printf(W("ReadyToRun: Method reference outside of current version bubble cannot be encoded\n"));
             ThrowHR(E_FAIL);
         }
-        _ASSERTE(pReferencingModule == GetAppDomain()->ToCompilationDomain()->GetTargetModule());
 
-        methodToken = pResolvedToken->token;
+        methodToken = pMethod->IsNDirect() ?
+            pMethod->GetMemberDef_NoLogging() :
+            pResolvedToken->token;
 
         if (TypeFromToken(methodToken) == mdtMethodSpec)
         {
@@ -1222,7 +1233,7 @@ BOOL ZapSig::EncodeMethod(
         switch (TypeFromToken(methodToken))
         {
         case mdtMethodDef:
-            _ASSERTE(pResolvedToken->pTypeSpec == NULL);
+            _ASSERTE(pMethod->IsNDirect() || pResolvedToken->pTypeSpec == NULL);
             if (!ownerType.HasInstantiation() || ownerType.IsTypicalTypeDefinition())
             {
                 methodFlags &= ~ENCODE_METHOD_SIG_OwnerType;
@@ -1230,6 +1241,7 @@ BOOL ZapSig::EncodeMethod(
             break;
 
         case mdtMemberRef:
+            _ASSERTE(pResolvedToken != NULL);
             methodFlags |= ENCODE_METHOD_SIG_MemberRefToken;
 
             if (pResolvedToken->pTypeSpec == NULL)
@@ -1303,7 +1315,7 @@ BOOL ZapSig::EncodeMethod(
         }
         else
         {
-            _ASSERTE(pInfoModule = pMethod->GetModule());
+            _ASSERTE(pInfoModule == pMethod->GetModule());
         }
 
         if (!ownerType.HasInstantiation())
@@ -1320,6 +1332,14 @@ BOOL ZapSig::EncodeMethod(
         if (fEncodeUsingResolvedTokenSpecStreams && pResolvedToken != NULL && pResolvedToken->pTypeSpec != NULL)
         {
             _ASSERTE(pResolvedToken->cbTypeSpec > 0);
+
+            if (IsReadyToRunCompilation() && pMethod->GetModule()->IsInCurrentVersionBubble() && pInfoModule != (Module *) pResolvedToken->tokenScope)
+            {
+                pSigBuilder->AppendElementType((CorElementType)ELEMENT_TYPE_MODULE_ZAPSIG);
+                DWORD index = (*((EncodeModuleCallback)pfnEncodeModule))(pEncodeModuleContext, (Module *) pResolvedToken->tokenScope);
+                pSigBuilder->AppendData(index);
+            }
+
             pSigBuilder->AppendBlob((PVOID)pResolvedToken->pTypeSpec, pResolvedToken->cbTypeSpec);
         }
         else
@@ -1346,10 +1366,40 @@ BOOL ZapSig::EncodeMethod(
         {
             _ASSERTE(pResolvedToken->cbMethodSpec > 1);
 
-            if (*(BYTE*)pResolvedToken->pMethodSpec != (BYTE)IMAGE_CEE_CS_CALLCONV_GENERICINST)
+            // Copy the pResolvedToken->pMethodSpec, inserting ELEMENT_TYPE_MODULE_ZAPSIG in front of each type parameter in needed
+            SigParser sigParser(pResolvedToken->pMethodSpec);
+            BYTE callingConvention;
+            IfFailThrow(sigParser.GetByte(&callingConvention));
+            if (callingConvention != (BYTE)IMAGE_CEE_CS_CALLCONV_GENERICINST)
+            {
                 ThrowHR(COR_E_BADIMAGEFORMAT);
+            }
 
-            pSigBuilder->AppendBlob((PVOID)(((BYTE*)pResolvedToken->pMethodSpec) + 1), pResolvedToken->cbMethodSpec - 1);
+            ULONG numGenArgs;
+            IfFailThrow(sigParser.GetData(&numGenArgs));
+            pSigBuilder->AppendData(numGenArgs);
+
+            DWORD moduleIndex;
+            bool addModuleZapSig = (IsReadyToRunCompilation() && pMethod->GetModule()->IsInCurrentVersionBubble() && pInfoModule != (Module *) pResolvedToken->tokenScope);
+            if (addModuleZapSig)
+            {
+                moduleIndex = (*((EncodeModuleCallback)pfnEncodeModule))(pEncodeModuleContext, (Module *) pResolvedToken->tokenScope);
+            }
+
+            while (numGenArgs != 0)
+            {
+                if (addModuleZapSig)
+                {
+                    pSigBuilder->AppendElementType((CorElementType)ELEMENT_TYPE_MODULE_ZAPSIG);
+                    pSigBuilder->AppendData(moduleIndex);
+                }
+
+                PCCOR_SIGNATURE typeSigStart = sigParser.GetPtr();
+                IfFailThrow(sigParser.SkipExactlyOne());
+                PCCOR_SIGNATURE typeSigEnd = sigParser.GetPtr();
+                pSigBuilder->AppendBlob((PVOID)typeSigStart, typeSigEnd - typeSigStart);
+                numGenArgs--;
+            }
         }
         else
         {
@@ -1376,6 +1426,14 @@ BOOL ZapSig::EncodeMethod(
         if (fEncodeUsingResolvedTokenSpecStreams && pConstrainedResolvedToken->pTypeSpec != NULL)
         {
             _ASSERTE(pConstrainedResolvedToken->cbTypeSpec > 0);
+
+            if (IsReadyToRunCompilation() && pMethod->GetModule()->IsInCurrentVersionBubble() && pInfoModule != (Module *) pConstrainedResolvedToken->tokenScope)
+            {
+                pSigBuilder->AppendElementType((CorElementType)ELEMENT_TYPE_MODULE_ZAPSIG);
+                DWORD index = (*((EncodeModuleCallback)pfnEncodeModule))(pEncodeModuleContext, (Module *) pConstrainedResolvedToken->tokenScope);
+                pSigBuilder->AppendData(index);
+            }
+
             pSigBuilder->AppendBlob((PVOID)pConstrainedResolvedToken->pTypeSpec, pConstrainedResolvedToken->cbTypeSpec);
         }
         else
@@ -1412,7 +1470,7 @@ void ZapSig::EncodeField(
     DWORD fieldFlags = ENCODE_FIELD_SIG_OwnerType;
 
 #ifdef FEATURE_READYTORUN_COMPILER
-    if (IsReadyToRunCompilation())
+    if (IsReadyToRunCompilation() && (!IsLargeVersionBubbleEnabled() || !pField->GetModule()->IsInCurrentVersionBubble()))
     {
         if (pResolvedToken == NULL)
         {
@@ -1516,5 +1574,3 @@ void ZapSig::EncodeField(
 }
 
 #endif // DACCESS_COMPILE
-
-#endif // FEATURE_PREJIT

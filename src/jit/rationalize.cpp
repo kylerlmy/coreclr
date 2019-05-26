@@ -16,9 +16,6 @@ genTreeOps storeForm(genTreeOps loadForm)
             return GT_STORE_LCL_VAR;
         case GT_LCL_FLD:
             return GT_STORE_LCL_FLD;
-        case GT_REG_VAR:
-            noway_assert(!"reg vars only supported in classic backend\n");
-            unreached();
         default:
             noway_assert(!"not a data load opcode\n");
             unreached();
@@ -78,8 +75,8 @@ void copyFlags(GenTree* dst, GenTree* src, unsigned mask)
 void Rationalizer::RewriteSIMDOperand(LIR::Use& use, bool keepBlk)
 {
 #ifdef FEATURE_SIMD
-    // No lowering is needed for non-SIMD nodes, so early out if featureSIMD is not enabled.
-    if (!comp->featureSIMD)
+    // No lowering is needed for non-SIMD nodes, so early out if SIMD types are not supported.
+    if (!comp->supportSIMDTypes())
     {
         return;
     }
@@ -107,7 +104,7 @@ void Rationalizer::RewriteSIMDOperand(LIR::Use& use, bool keepBlk)
         addr->gtType = simdType;
         use.ReplaceWith(comp, addr);
     }
-    else if ((addr->OperGet() == GT_ADDR) && (addr->gtGetOp1()->OperIsSIMDorSimdHWintrinsic()))
+    else if ((addr->OperGet() == GT_ADDR) && (addr->gtGetOp1()->OperIsSimdOrHWintrinsic()))
     {
         // if we have GT_IND(GT_ADDR(GT_SIMD)), remove the GT_IND(GT_ADDR()), leaving just the GT_SIMD.
         BlockRange().Remove(tree);
@@ -229,79 +226,11 @@ void Rationalizer::RewriteIntrinsicAsUserCall(GenTree** use, ArrayStack<GenTree*
                       args);
 }
 
-// FixupIfSIMDLocal: Fixup the type of a lclVar tree, as needed, if it is a SIMD type vector.
-//
-// Arguments:
-//    comp      - the Compiler object.
-//    tree      - the GenTreeLclVarCommon tree to be fixed up.
-//
-// Return Value:
-//    None.
-//
-// TODO-1stClassStructs: This is now only here to preserve existing behavior. It is actually not
-// desirable to change the lclFld nodes back to TYP_SIMD (it will cause them to be loaded
-// into a vector register, and then moved to an int register).
-
-void Rationalizer::FixupIfSIMDLocal(GenTreeLclVarCommon* node)
-{
-#ifdef FEATURE_SIMD
-    if (!comp->featureSIMD)
-    {
-        return;
-    }
-
-    LclVarDsc* varDsc = &(comp->lvaTable[node->gtLclNum]);
-
-    // Don't mark byref of SIMD vector as a SIMD type.
-    // Note that struct args though marked as lvIsSIMD=true,
-    // the tree node representing such an arg should not be
-    // marked as a SIMD type, since it is a byref of a SIMD type.
-    if (!varTypeIsSIMD(varDsc))
-    {
-        return;
-    }
-    switch (node->OperGet())
-    {
-        default:
-            // Nothing to do for most tree nodes.
-            break;
-
-        case GT_LCL_FLD:
-            // We may see a lclFld used for pointer-sized structs that have been morphed, in which
-            // case we can change it to GT_LCL_VAR.
-            // However, we may also see a lclFld with FieldSeqStore::NotAField() for structs that can't
-            // be analyzed, e.g. those with overlapping fields such as the IL implementation of Vector<T>.
-            if ((node->AsLclFld()->gtFieldSeq == FieldSeqStore::NotAField()) && (node->AsLclFld()->gtLclOffs == 0) &&
-                (node->gtType == TYP_I_IMPL) && (varDsc->lvExactSize == TARGET_POINTER_SIZE))
-            {
-                node->SetOper(GT_LCL_VAR);
-                node->gtFlags &= ~(GTF_VAR_USEASG);
-            }
-            else
-            {
-                // If we access a field of a SIMD lclVar via GT_LCL_FLD, it cannot have been
-                // independently promoted.
-                assert(comp->lvaGetPromotionType(varDsc) != Compiler::PROMOTION_TYPE_INDEPENDENT);
-                return;
-            }
-            break;
-        case GT_STORE_LCL_FLD:
-            assert(node->gtType == TYP_I_IMPL);
-            node->SetOper(GT_STORE_LCL_VAR);
-            node->gtFlags &= ~(GTF_VAR_USEASG);
-            break;
-    }
-    unsigned simdSize = roundUp(varDsc->lvExactSize, TARGET_POINTER_SIZE);
-    node->gtType      = comp->getSIMDTypeForSize(simdSize);
-#endif // FEATURE_SIMD
-}
-
 #ifdef DEBUG
 
-void Rationalizer::ValidateStatement(GenTree* tree, BasicBlock* block)
+void Rationalizer::ValidateStatement(GenTreeStmt* stmt, BasicBlock* block)
 {
-    assert(tree->gtOper == GT_STMT);
-    DBEXEC(TRUE, JitTls::GetCompiler()->fgDebugCheckNodeLinks(block, tree));
+    DBEXEC(TRUE, JitTls::GetCompiler()->fgDebugCheckNodeLinks(block, stmt));
 }
 
 // sanity checks that apply to all kinds of IR
@@ -311,11 +240,11 @@ void Rationalizer::SanityCheck()
     BasicBlock* block;
     foreach_block(comp, block)
     {
-        for (GenTree* statement = block->bbTreeList; statement != nullptr; statement = statement->gtNext)
+        for (GenTreeStmt* statement = block->firstStmt(); statement != nullptr; statement = statement->getNextStmt())
         {
             ValidateStatement(statement, block);
 
-            for (GenTree* tree = statement->gtStmt.gtStmtList; tree; tree = tree->gtNext)
+            for (GenTree* tree = statement->gtStmtList; tree; tree = tree->gtNext)
             {
                 // QMARK nodes should have been removed before this phase.
                 assert(tree->OperGet() != GT_QMARK);
@@ -483,7 +412,6 @@ void Rationalizer::RewriteAssignment(LIR::Use& use)
     {
         case GT_LCL_VAR:
         case GT_LCL_FLD:
-        case GT_REG_VAR:
         case GT_PHI_ARG:
             RewriteAssignmentIntoStoreLclCore(assignment, location, value, locationOp);
             BlockRange().Remove(location);
@@ -623,7 +551,7 @@ void Rationalizer::RewriteAddress(LIR::Use& use)
     JITDUMP("\n");
 }
 
-Compiler::fgWalkResult Rationalizer::RewriteNode(GenTree** useEdge, ArrayStack<GenTree*>& parentStack)
+Compiler::fgWalkResult Rationalizer::RewriteNode(GenTree** useEdge, Compiler::GenTreeStack& parentStack)
 {
     assert(useEdge != nullptr);
 
@@ -826,48 +754,24 @@ Compiler::fgWalkResult Rationalizer::RewriteNode(GenTree** useEdge, ArrayStack<G
             assert(comp->IsTargetIntrinsic(node->gtIntrinsic.gtIntrinsicId));
             break;
 
-#ifdef FEATURE_SIMD
         case GT_BLK:
-        case GT_OBJ:
-        {
-            // TODO-1stClassStructs: These should have been transformed to GT_INDs, but in order
-            // to preserve existing behavior, we will keep this as a block node if this is the
-            // lhs of a block assignment, and either:
-            // - It is a "generic" TYP_STRUCT assignment, OR
-            // - It is an initblk, OR
-            // - Neither the lhs or rhs are known to be of SIMD type.
-
-            GenTree* parent  = use.User();
-            bool     keepBlk = false;
-            if ((parent->OperGet() == GT_ASG) && (node == parent->gtGetOp1()))
-            {
-                if ((node->TypeGet() == TYP_STRUCT) || parent->OperIsInitBlkOp())
-                {
-                    keepBlk = true;
-                }
-                else if (!comp->isAddrOfSIMDType(node->AsBlk()->Addr()))
-                {
-                    GenTree* dataSrc = parent->gtGetOp2();
-                    if (!dataSrc->IsLocal() && (dataSrc->OperGet() != GT_SIMD) && (!dataSrc->OperIsHWIntrinsic()))
-                    {
-                        noway_assert(dataSrc->OperIsIndir());
-                        keepBlk = !comp->isAddrOfSIMDType(dataSrc->AsIndir()->Addr());
-                    }
-                }
-            }
-            RewriteSIMDOperand(use, keepBlk);
-        }
-        break;
-
-        case GT_LCL_FLD:
-        case GT_STORE_LCL_FLD:
-            // TODO-1stClassStructs: Eliminate this.
-            FixupIfSIMDLocal(node->AsLclVarCommon());
+            // We should only see GT_BLK for TYP_STRUCT or for InitBlocks.
+            assert((node->TypeGet() == TYP_STRUCT) || use.User()->OperIsInitBlkOp());
             break;
 
+        case GT_OBJ:
+            assert(node->TypeGet() == TYP_STRUCT || !use.User()->OperIsInitBlkOp());
+            if (varTypeIsSIMD(node))
+            {
+                // Rewrite these as GT_IND.
+                RewriteSIMDOperand(use, false);
+            }
+            break;
+
+#ifdef FEATURE_SIMD
         case GT_SIMD:
         {
-            noway_assert(comp->featureSIMD);
+            noway_assert(comp->supportSIMDTypes());
             GenTreeSIMD* simdNode = node->AsSIMD();
             unsigned     simdSize = simdNode->gtSIMDSize;
             var_types    simdType = comp->getSIMDTypeForSize(simdSize);

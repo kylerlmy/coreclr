@@ -133,7 +133,6 @@ public:
               BOOL fIsStatic, 
               BOOL fIsRVA, 
               BOOL fIsThreadLocal, 
-              BOOL fIsContextLocal, 
               LPCSTR pszFieldName);
 
     enum {
@@ -322,13 +321,6 @@ public:
         return m_isThreadLocal;
     }
 
-    BOOL   IsContextStatic() const     // Static relative to a context
-    {
-        LIMITED_METHOD_DAC_CONTRACT;
-
-        return FALSE;
-    }
-
     // Indicate that this field was added by EnC
     // Must only be called on instances of EnCFieldDesc
     void SetEnCNew() 
@@ -459,42 +451,18 @@ public:
         }
     }
 
-#ifndef DACCESS_COMPILE
     PTR_BYTE GetBase()
     {
         CONTRACTL
         {
-          THROWS;
-          GC_TRIGGERS;
-          INJECT_FAULT(COMPlusThrowOM());
+          NOTHROW;
+          GC_NOTRIGGER;
         }
         CONTRACTL_END
 
         MethodTable *pMT = GetEnclosingMethodTable();
 
         return GetBaseInDomainLocalModule(pMT->GetDomainLocalModule());
-    }
-
-#endif //!DACCESS_COMPILE
-
-    PTR_BYTE GetBaseInDomain(AppDomain * appDomain)
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-        }
-        CONTRACTL_END;
-
-        Module *pModule = GetEnclosingMethodTable()->GetModuleForStatics();
-        if (pModule == NULL)
-            return NULL;
-
-        DomainLocalModule *pLocalModule = pModule->GetDomainLocalModule(appDomain);
-        if (pLocalModule == NULL)
-            return NULL;
-
-        return GetBaseInDomainLocalModule(pLocalModule);
     }
 
     // returns the address of the field
@@ -529,7 +497,7 @@ public:
 
         GCPROTECT_BEGIN(objRef);
         OBJECTREF *pObjRef = (OBJECTREF *)GetCurrentStaticAddress();
-        SetObjectReference(pObjRef, objRef, GetAppDomain());
+        SetObjectReference(pObjRef, objRef);
         GCPROTECT_END();
     }
 
@@ -664,7 +632,6 @@ public:
           NOTHROW;
           GC_NOTRIGGER;
           MODE_ANY;
-          SO_TOLERANT;
         }
         CONTRACTL_END
 
@@ -714,7 +681,6 @@ public:
           NOTHROW;
           GC_NOTRIGGER;
           MODE_ANY;
-          SO_TOLERANT;
         }
         CONTRACTL_END
         
@@ -732,7 +698,6 @@ public:
           NOTHROW;
           GC_NOTRIGGER;
           MODE_ANY;
-          SO_TOLERANT;
         }
         CONTRACTL_END
 
@@ -765,34 +730,6 @@ public:
         WRAPPER_NO_CONTRACT;
 
         return IsFdPrivate(GetFieldProtection());
-    }
-
-    BOOL IsNotSerialized()
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-            SO_TOLERANT;
-            MODE_ANY;
-        }
-        CONTRACTL_END;
-
-        MethodTable *pMT = GetApproxEnclosingMethodTable();
-        if (pMT->IsSerializable() && !IsStatic())
-            return pMT->IsFieldNotSerialized(pMT->GetIndexForFieldDesc(this));
-        return IsFdNotSerialized(GetAttributes());
-    }
-
-    // Only safe to call this for non-static fields on serializable types.
-    BOOL IsOptionallySerialized()
-    {
-        WRAPPER_NO_CONTRACT;
-
-        _ASSERTE(!IsStatic() && GetApproxEnclosingMethodTable()->IsSerializable());
-
-        MethodTable *pMT = GetApproxEnclosingMethodTable();
-        return pMT->IsFieldOptionallySerialized(pMT->GetIndexForFieldDesc(this));
     }
 
     IMDInternalImport *GetMDImport()

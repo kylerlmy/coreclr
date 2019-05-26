@@ -76,7 +76,7 @@ OBJECTREF InvokeUtil::CreatePointer(TypeHandle th, void * p)
     ((ReflectionPointer *)OBJECTREFToObject(refObj))->_ptr = p;
 
     OBJECTREF refType = th.GetManagedClassObject();
-    SetObjectReference(&(((ReflectionPointer *)OBJECTREFToObject(refObj))->_ptrType), refType, GetAppDomain());
+    SetObjectReference(&(((ReflectionPointer *)OBJECTREFToObject(refObj))->_ptrType), refType);
     
     GCPROTECT_END();
     RETURN refObj;
@@ -745,7 +745,7 @@ OBJECTREF InvokeUtil::CreateClassLoadExcept(OBJECTREF* classes, OBJECTREF* excep
     // Retrieve the resource string.
     ResMgrGetString(W("ReflectionTypeLoad_LoadFailed"), &gc.str);
 
-    MethodDesc* pMD = MemberLoader::FindMethod(gc.o->GetTrueMethodTable(),
+    MethodDesc* pMD = MemberLoader::FindMethod(gc.o->GetMethodTable(),
                             COR_CTOR_METHOD_NAME, &gsig_IM_ArrType_ArrException_Str_RetVoid);
 
     if (!pMD)
@@ -792,7 +792,7 @@ OBJECTREF InvokeUtil::CreateTargetExcept(OBJECTREF* except) {
     GCPROTECT_BEGIN(o);
     ARG_SLOT args[2];
 
-    MethodDesc* pMD = MemberLoader::FindMethod(o->GetTrueMethodTable(),
+    MethodDesc* pMD = MemberLoader::FindMethod(o->GetMethodTable(),
                             COR_CTOR_METHOD_NAME, &gsig_IM_Exception_RetVoid);
     
     if (!pMD)
@@ -970,10 +970,9 @@ void InvokeUtil::SetValidField(CorElementType fldType,
         else
         {
             pDeclMT->EnsureInstanceActive();
-            pDeclMT->CheckRunClassInitThrowing();   
+            pDeclMT->CheckRunClassInitThrowing();
 
-            if (declaringType.IsDomainNeutral() == FALSE)
-                *pDomainInitialized = TRUE;
+            *pDomainInitialized = TRUE;
         }
         }
         EX_CATCH_THROWABLE(&Throwable);
@@ -1181,8 +1180,7 @@ OBJECTREF InvokeUtil::GetFieldValue(FieldDesc* pField, TypeHandle fieldType, OBJ
             pDeclMT->EnsureInstanceActive();
             pDeclMT->CheckRunClassInitThrowing();   
 
-            if (!declaringType.IsDomainNeutral())
-                *pDomainInitialized = TRUE;
+            *pDomainInitialized = TRUE;
         }
         }
         EX_CATCH_THROWABLE(&Throwable);
@@ -1233,8 +1231,7 @@ OBJECTREF InvokeUtil::GetFieldValue(FieldDesc* pField, TypeHandle fieldType, OBJ
         if (pField->IsStatic()) 
             CopyValueClass(obj->UnBox(), 
                            pField->GetCurrentStaticAddress(), 
-                           fieldType.AsMethodTable(), 
-                           obj->GetAppDomain());
+                           fieldType.AsMethodTable());
         else
             pField->GetInstanceField(*target, obj->UnBox());
         GCPROTECT_END();
@@ -1274,7 +1271,7 @@ OBJECTREF InvokeUtil::GetFieldValue(FieldDesc* pField, TypeHandle fieldType, OBJ
         // copy the field to the unboxed object.
         // note: this will be done only for the non-remoting case
         if (p) {
-            CopyValueClass(obj->GetData(), p, fieldType.AsMethodTable(), obj->GetAppDomain());
+            CopyValueClass(obj->GetData(), p, fieldType.AsMethodTable());
         }
 
             // If it is a Nullable<T>, box it using Nullable<T> conventions.
@@ -1293,7 +1290,7 @@ OBJECTREF InvokeUtil::GetFieldValue(FieldDesc* pField, TypeHandle fieldType, OBJ
 
         MethodTable *pIntPtrMT = MscorlibBinder::GetClass(CLASS__INTPTR);
         obj = AllocateObject(pIntPtrMT);
-        CopyValueClass(obj->UnBox(), &value, pIntPtrMT, obj->GetAppDomain());
+        CopyValueClass(obj->UnBox(), &value, pIntPtrMT);
         break;
     }
 

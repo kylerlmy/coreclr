@@ -52,34 +52,7 @@ DomainAssembly * LoadDomainAssembly(
     BOOL       bThrowIfNotFound, 
     SString *  pssOuterTypeName);
 
-class TypeNameFactory : public ITypeNameFactory
-{    
-public:
-    static HRESULT CreateObject(REFIID riid, void **ppUnk);
-    
-public:
-    virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppUnk);
-    virtual ULONG STDMETHODCALLTYPE AddRef() { LIMITED_METHOD_CONTRACT; m_count++; return m_count; }
-    virtual ULONG STDMETHODCALLTYPE Release() { LIMITED_METHOD_CONTRACT; SUPPORTS_DAC_HOST_ONLY; m_count--; ULONG count = m_count; if (count == 0) delete this; return count; }
-
-public:
-    virtual HRESULT STDMETHODCALLTYPE ParseTypeName(LPCWSTR szName, DWORD* pError, ITypeName** ppTypeName);
-    virtual HRESULT STDMETHODCALLTYPE GetTypeNameBuilder(ITypeNameBuilder** ppTypeBuilder);
-
-public:
-    TypeNameFactory() : m_count(0)
-    {
-        WRAPPER_NO_CONTRACT;
-        SString::Startup();
-    }
-
-    virtual ~TypeNameFactory() {}
-        
-private:
-    DWORD m_count;
-};
-
-class TypeName : public ITypeName
+class TypeName
 {
 private:
     template<typename PRODUCT>
@@ -95,10 +68,8 @@ private:
             CONTRACTL
             {
                 NOTHROW;
-                SO_TOLERANT;
             }
             CONTRACTL_END;
-            VALIDATE_BACKOUT_STACK_CONSUMPTION;               
 
             if (m_next) 
                 delete m_next; 
@@ -121,7 +92,7 @@ private:
 private:
     class TypeNameParser
     {
-        TypeNameParser(LPCWSTR szTypeName, TypeName* pTypeName, DWORD* pError) 
+        TypeNameParser(LPCWSTR szTypeName, TypeName* pTypeName)
         {
             CONTRACTL
             {
@@ -139,13 +110,9 @@ private:
             m_currentToken = TypeNameEmpty;
             m_nextToken = TypeNameEmpty;
 
-            *pError = (DWORD)-1;
             m_pTypeName = pTypeName;
             m_sszTypeName = szTypeName;
-            m_currentItr = m_itr = m_sszTypeName; 
-
-            if (!START())
-                *pError = (DWORD)(m_currentItr - m_sszTypeName) - 1;
+            m_currentItr = m_itr = m_sszTypeName;
         }
 
     private:
@@ -264,7 +231,20 @@ private:
         // id '+' NESTNAME
   
     public:
-        void MakeRotorHappy() { WRAPPER_NO_CONTRACT; }
+        void Parse(DWORD* pError)
+        {
+            CONTRACTL
+            {
+                THROWS;
+                GC_NOTRIGGER;
+                MODE_ANY;
+            }
+            CONTRACTL_END;
+
+            *pError = (DWORD)-1;
+            if (!START())
+                *pError = (DWORD)(m_currentItr - m_sszTypeName) - 1;
+        }
     
     private:
         TypeName* m_pTypeName;
@@ -275,21 +255,11 @@ private:
         TypeNameTokens m_nextToken;
     };
     friend class TypeName::TypeNameParser;
-    
-public:
-    virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppUnk);
-    virtual ULONG STDMETHODCALLTYPE AddRef();
-    virtual ULONG STDMETHODCALLTYPE Release();
 
 public:
-    virtual HRESULT STDMETHODCALLTYPE GetNameCount(DWORD* pCount);
-    virtual HRESULT STDMETHODCALLTYPE GetNames(DWORD count, BSTR* rgbszNames, DWORD* pFetched);
-    virtual HRESULT STDMETHODCALLTYPE GetTypeArgumentCount(DWORD* pCount);
-    virtual HRESULT STDMETHODCALLTYPE GetTypeArguments(DWORD count, ITypeName** rgpArguments, DWORD* pFetched);
-    virtual HRESULT STDMETHODCALLTYPE GetModifierLength(DWORD* pCount);
-    virtual HRESULT STDMETHODCALLTYPE GetModifiers(DWORD count, DWORD* rgModifiers, DWORD* pFetched);
-    virtual HRESULT STDMETHODCALLTYPE GetAssemblyName(BSTR* rgbszAssemblyNames);
-    
+    ULONG AddRef();
+    ULONG Release();
+
 public:
     TypeName(LPCWSTR szTypeName, DWORD* pError) : m_bIsGenericArgument(FALSE), m_count(0) 
     {
@@ -300,8 +270,8 @@ public:
             MODE_ANY;
         }
         CONTRACTL_END;
-        TypeNameParser parser(szTypeName, this, pError); 
-        parser.MakeRotorHappy(); 
+        TypeNameParser parser(szTypeName, this);
+        parser.Parse(pError);
     }
 
     virtual ~TypeName();
@@ -366,7 +336,7 @@ public:
         BOOL bThrowIfNotFound,
         BOOL bIgnoreCase,
         BOOL bProhibitAssemblyQualifiedName,
-        StackCrawlMark* pStackMark,
+        Assembly* pRequestingAssembly,
         BOOL bLoadTypeFromPartialNameHack,
         OBJECTREF *pKeepAlive,
         ICLRPrivBinder * pPrivHostBinder = nullptr);
@@ -431,7 +401,6 @@ private:
                                     
         BOOL bProhibitAssemblyQualifiedName,
                                     
-        StackCrawlMark* pStackMark, 
         Assembly* pRequestingAssembly, 
         ICLRPrivBinder * pPrivHostBinder,
         BOOL bLoadTypeFromPartialNameHack,

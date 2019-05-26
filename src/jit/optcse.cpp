@@ -377,24 +377,89 @@ void Compiler::optValnumCSE_Init()
     optCseCheckedBoundMap = nullptr;
 }
 
-/*****************************************************************************
- *
- *  Assign an index to the given expression (adding it to the lookup table,
- *  if necessary). Returns the index or 0 if the expression can not be a CSE.
- */
-
-unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTree* stmt)
+//---------------------------------------------------------------------------
+// optValnumCSE_Index:
+//               - Returns the CSE index to use for this tree,
+//                 or zero if this expression is not currently a CSE.
+//
+// Arguments:
+//    tree       - The current candidate CSE expression
+//    stmt       - The current statement that contains tree
+//
+//
+// Notes:   We build a hash table that contains all of the expressions that
+//          are presented to this method.  Whenever we see a duplicate expression
+//          we have a CSE candidate.  If it is the first time seeing the duplicate
+//          we allocate a new CSE index. If we have already allocated a CSE index
+//          we return that index.  There currently is a limit on the number of CSEs
+//          that we can have of MAX_CSE_CNT (64)
+//
+unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTreeStmt* stmt)
 {
     unsigned key;
     unsigned hash;
     unsigned hval;
     CSEdsc*  hashDsc;
 
-    ValueNum vnlib = tree->GetVN(VNK_Liberal);
+    // We use the liberal Value numbers when building the set of CSE
+    ValueNum vnLib     = tree->GetVN(VNK_Liberal);
+    ValueNum vnLibNorm = vnStore->VNNormalValue(vnLib);
 
-    /* Compute the hash value for the expression */
+    // We use the normal value number because we want the CSE candidate to
+    // represent all expressions that produce the same normal value number
+    // We will handle the case where we have different exception sets when
+    // promoting the candidates.
+    //
+    // We do this because a GT_IND will usually have a NullPtrExc entry in its
+    // exc set, but we may have cleared the GTF_EXCEPT flag and if so, it won't
+    // have an NullPtrExc, or we may have assigned the value of an  GT_IND
+    // into a LCL_VAR and then read it back later.
+    //
+    // When we are promoting the CSE candidates we insure that any CSE
+    // uses that we promote have an exc set that is the same as the CSE defs
+    // or have an empty set.  And that all of the CSE defs produced the required
+    // set of exceptions for the CSE uses.
+    //
 
-    key = (unsigned)vnlib;
+    // We assign either vnLib or vnLibNorm as the hash key
+    //
+    // The only exception to using the normal value is for the GT_COMMA nodes.
+    // Here we check to see if we have a GT_COMMA with a different value number
+    // than the one from its op2.  For this case we want to create two different
+    // CSE candidates. This allows us to CSE the GT_COMMA separately from its value.
+    //
+    if (tree->OperGet() == GT_COMMA)
+    {
+        // op2 is the value produced by a GT_COMMA
+        GenTree* op2      = tree->gtOp.gtOp2;
+        ValueNum vnOp2Lib = op2->GetVN(VNK_Liberal);
+
+        // If the value number for op2 and tree are different, then some new
+        // exceptions were produced by op1. For that case we will NOT use the
+        // normal value. This allows us to CSE commas with an op1 that is
+        // an ARR_BOUNDS_CHECK.
+        //
+        if (vnOp2Lib != vnLib)
+        {
+            key = (unsigned)vnLib; // include the exc set in the hash key
+        }
+        else
+        {
+            key = (unsigned)vnLibNorm;
+        }
+
+        // If we didn't do the above we would have op1 as the CSE def
+        // and the parent comma as the CSE use (but with a different exc set)
+        // This would prevent us from making any CSE with the comma
+        //
+        assert(vnLibNorm == vnStore->VNNormalValue(vnOp2Lib));
+    }
+    else // Not a GT_COMMA
+    {
+        key = (unsigned)vnLibNorm;
+    }
+
+    // Compute the hash value for the expression
 
     hash = key;
     hash *= (unsigned)(s_optCSEhashSize + 1);
@@ -408,7 +473,7 @@ unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTree* stmt)
 
     for (hashDsc = optCSEhash[hval]; hashDsc; hashDsc = hashDsc->csdNextInBucket)
     {
-        if (hashDsc->csdHashValue == key)
+        if (hashDsc->csdHashKey == key)
         {
             treeStmtLst* newElem;
 
@@ -453,10 +518,6 @@ unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTree* stmt)
                 newCSE = true;
                 break;
             }
-#if 0 
-            // Use this to see if this Value Number base CSE is also a lexical CSE
-            bool treeMatch = GenTree::Compare(hashDsc->csdTree, tree, true);
-#endif
 
             assert(FitsIn<signed char>(hashDsc->csdIndex));
             tree->gtCSEnum = ((signed char)hashDsc->csdIndex);
@@ -472,13 +533,16 @@ unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTree* stmt)
         {
             hashDsc = new (this, CMK_CSE) CSEdsc;
 
-            hashDsc->csdHashValue      = key;
+            hashDsc->csdHashKey        = key;
             hashDsc->csdIndex          = 0;
             hashDsc->csdLiveAcrossCall = 0;
             hashDsc->csdDefCount       = 0;
             hashDsc->csdUseCount       = 0;
             hashDsc->csdDefWtCnt       = 0;
             hashDsc->csdUseWtCnt       = 0;
+            hashDsc->defExcSetPromise  = vnStore->VNForEmptyExcSet();
+            hashDsc->defExcSetCurrent  = vnStore->VNForNull(); // uninit value
+            hashDsc->defConservNormVN  = vnStore->VNForNull(); // uninit value
 
             hashDsc->csdTree     = tree;
             hashDsc->csdStmt     = stmt;
@@ -525,7 +589,7 @@ unsigned Compiler::optValnumCSE_Index(GenTree* tree, GenTree* stmt)
         {
             EXPSET_TP tempMask = BitVecOps::MakeSingleton(cseTraits, genCSEnum2bit(CSEindex));
             printf("\nCSE candidate #%02u, vn=", CSEindex);
-            vnPrint(vnlib, 0);
+            vnPrint(key, 0);
             printf(" cseMask=%s in " FMT_BB ", [cost=%2u, size=%2u]: \n", genES2str(cseTraits, tempMask),
                    compCurBB->bbNum, tree->gtCostEx, tree->gtCostSz);
             gtDispTree(tree);
@@ -547,11 +611,8 @@ unsigned Compiler::optValnumCSE_Locate()
 {
     // Locate CSE candidates and assign them indices
 
-    for (BasicBlock* block = fgFirstBB; block; block = block->bbNext)
+    for (BasicBlock* block = fgFirstBB; block != nullptr; block = block->bbNext)
     {
-        GenTree* stmt;
-        GenTree* tree;
-
         /* Make the block publicly available */
 
         compCurBB = block;
@@ -561,13 +622,11 @@ unsigned Compiler::optValnumCSE_Locate()
         noway_assert((block->bbFlags & (BBF_VISITED | BBF_MARKED)) == 0);
 
         /* Walk the statement trees in this basic block */
-        for (stmt = block->FirstNonPhiDef(); stmt; stmt = stmt->gtNext)
+        for (GenTreeStmt* stmt = block->FirstNonPhiDef(); stmt != nullptr; stmt = stmt->getNextStmt())
         {
-            noway_assert(stmt->gtOper == GT_STMT);
-
             /* We walk the tree in the forwards direction (bottom up) */
             bool stmtHasArrLenCandidate = false;
-            for (tree = stmt->gtStmt.gtStmtList; tree; tree = tree->gtNext)
+            for (GenTree* tree = stmt->gtStmtList; tree != nullptr; tree = tree->gtNext)
             {
                 if (tree->OperIsCompare() && stmtHasArrLenCandidate)
                 {
@@ -582,9 +641,7 @@ unsigned Compiler::optValnumCSE_Locate()
                     continue;
                 }
 
-                ValueNum vnlib = tree->GetVN(VNK_Liberal);
-
-                if (ValueNumStore::isReservedVN(vnlib))
+                if (ValueNumStore::isReservedVN(tree->GetVN(VNK_Liberal)))
                 {
                     continue;
                 }
@@ -597,7 +654,7 @@ unsigned Compiler::optValnumCSE_Locate()
                 // and the point is to avoid optimizing cases that it will
                 // handle.
                 //
-                if (vnStore->IsVNConstant(tree->GetVN(VNK_Conservative)))
+                if (vnStore->IsVNConstant(vnStore->VNConservativeNormalValue(tree->gtVNPair)))
                 {
                     continue;
                 }
@@ -891,20 +948,41 @@ void Compiler::optValnumCSE_DataFlow()
 #endif // DEBUG
 }
 
-/*****************************************************************************
- *
- *   Using the information computed by CSE_DataFlow determine for each
- *   CSE whether the CSE is a definition (if the CSE was not available)
- *   or if the CSE is a use (if the CSE was previously made available)
- *   The implementation iterates of all blocks setting 'available_cses'
- *   to the CSEs that are available at input to the block.
- *   When a CSE expression is encountered it is classified as either
- *   as a definition (if the CSE is not in the 'available_cses' set) or
- *   as a use (if the CSE is  in the 'available_cses' set).  If the CSE
- *   is a definition then it is added to the 'available_cses' set.
- *   In the Value Number based CSEs we do not need to have kill sets
- */
-
+//---------------------------------------------------------------------------
+// optValnumCSE_Availablity:
+//
+//     Using the information computed by CSE_DataFlow determine for each
+//     CSE whether the CSE is a definition (if the CSE was not available)
+//     or if the CSE is a use (if the CSE was previously made available)
+//     The implementation iterates of all blocks setting 'available_cses'
+//     to the CSEs that are available at input to the block.
+//     When a CSE expression is encountered it is classified as either
+//     as a definition (if the CSE is not in the 'available_cses' set) or
+//     as a use (if the CSE is  in the 'available_cses' set).  If the CSE
+//     is a definition then it is added to the 'available_cses' set.
+//
+//     This algorithm uncovers the defs and uses gradually and as it does
+//     so it also builds the exception set that all defs make: 'defExcSetCurrent'
+//     and the exception set that the uses we have seen depend upon: 'defExcSetPromise'
+//
+//     Typically expressions with the same normal ValueNum generate exactly the
+//     same exception sets. There are two way that we can get different exception
+//     sets with the same Normal value number.
+//
+//     1. We used an arithmetic identiity:
+//        e.g. (p.a + q.b) * 0   :: The normal value for the expression is zero
+//                                  and we have NullPtrExc(p) and NullPtrExc(q)
+//        e.g. (p.a - p.a)       :: The normal value for the expression is zero
+//                                  and we have NullPtrExc(p)
+//     2. We stored an expression into a LclVar or into Memory and read it later
+//        e.g. t = p.a;
+//             e1 = (t + q.b)    :: e1 has one NullPtrExc and e2 has two.
+//             e2 = (p.a + q.b)     but both compute the same normal value//
+//        e.g. m.a = p.a;
+//             e1 = (m.a + q.b)  :: e1 and e2 have different exception sets.
+//             e2 = (p.a + q.b)     but both compute the same normal value
+//
+//
 void Compiler::optValnumCSE_Availablity()
 {
 #ifdef DEBUG
@@ -915,84 +993,251 @@ void Compiler::optValnumCSE_Availablity()
 #endif
     EXPSET_TP available_cses = BitVecOps::MakeEmpty(cseTraits);
 
-    for (BasicBlock* block = fgFirstBB; block; block = block->bbNext)
+    for (BasicBlock* block = fgFirstBB; block != nullptr; block = block->bbNext)
     {
-        GenTree* stmt;
-        GenTree* tree;
-
-        /* Make the block publicly available */
+        // Make the block publicly available
 
         compCurBB = block;
+
+        // Retrieve the available CSE's at the start of this block
 
         BitVecOps::Assign(cseTraits, available_cses, block->bbCseIn);
 
         optCSEweight = block->getBBWeight(this);
 
-        /* Walk the statement trees in this basic block */
+        // Walk the statement trees in this basic block
 
-        for (stmt = block->FirstNonPhiDef(); stmt; stmt = stmt->gtNext)
+        for (GenTreeStmt* stmt = block->FirstNonPhiDef(); stmt != nullptr; stmt = stmt->getNextStmt())
         {
-            noway_assert(stmt->gtOper == GT_STMT);
+            // We walk the tree in the forwards direction (bottom up)
 
-            /* We walk the tree in the forwards direction (bottom up) */
-            for (tree = stmt->gtStmt.gtStmtList; tree; tree = tree->gtNext)
+            for (GenTree* tree = stmt->gtStmtList; tree != nullptr; tree = tree->gtNext)
             {
                 if (IS_CSE_INDEX(tree->gtCSEnum))
                 {
-                    unsigned int cseBit = genCSEnum2bit(tree->gtCSEnum);
-                    CSEdsc*      desc   = optCSEfindDsc(tree->gtCSEnum);
+                    unsigned     CSEnum = GET_CSE_INDEX(tree->gtCSEnum);
+                    unsigned int cseBit = genCSEnum2bit(CSEnum);
+                    CSEdsc*      desc   = optCSEfindDsc(CSEnum);
                     unsigned     stmw   = block->getBBWeight(this);
+                    bool         isUse  = BitVecOps::IsMember(cseTraits, available_cses, cseBit);
+                    bool         isDef  = !isUse; // If is isn't a CSE use, it is a CSE def
+#ifdef DEBUG
+                    VNFuncApp excSeq;
 
-                    /* Is this expression available here? */
-
-                    if (BitVecOps::IsMember(cseTraits, available_cses, cseBit))
+                    if (verbose)
                     {
-                        /* This is a CSE use */
+                        printf("BB%02u ", block->bbNum);
+                        printTreeID(tree);
 
-                        desc->csdUseCount += 1;
-                        desc->csdUseWtCnt += stmw;
+                        printf(" %s of CSE #%02u [weight=%s]\n", isUse ? "Use" : "Def", CSEnum, refCntWtd2str(stmw));
                     }
-                    else
+#endif
+                    // Have we decided to abandon work on this CSE?
+                    if (desc->defExcSetPromise == ValueNumStore::NoVN)
                     {
+                        // This candidate had defs with differing liberal exc set VNs
+                        // We have abandoned CSE promotion for this candidate
+
+                        // Clear the CSE flag
+                        tree->gtCSEnum = NO_CSE;
+
+                        JITDUMP(" Abandoned - CSE candidate has defs with different exception sets!\n");
+                        continue;
+                    }
+
+                    // Record the exception set for tree's liberal value number
+                    //
+                    ValueNum theLiberalExcSet = vnStore->VNExceptionSet(tree->gtVNPair.GetLiberal());
+
+                    // Is this a CSE use or a def?
+
+                    if (isDef)
+                    {
+                        // @ToDo - Remove this block as it no longer applies
                         if (tree->gtFlags & GTF_COLON_COND)
                         {
                             // We can't create CSE definitions inside QMARK-COLON trees
                             tree->gtCSEnum = NO_CSE;
+
+                            JITDUMP(" NO_CSE - This CSE def occurs in a GTF_COLON_COND!\n");
                             continue;
                         }
 
-                        /* This is a CSE def */
+                        // This is a CSE def
 
-                        if (desc->csdDefCount == 0)
+                        // Is defExcSetCurrent still set to the uninit marker value of VNForNull() ?
+                        if (desc->defExcSetCurrent == vnStore->VNForNull())
                         {
-                            // This is the first def visited, so copy its conservative VN
-                            desc->defConservativeVN = tree->gtVNPair.GetConservative();
+                            // This is the first time visited, so record this defs exeception set
+                            desc->defExcSetCurrent = theLiberalExcSet;
                         }
-                        else if (tree->gtVNPair.GetConservative() != desc->defConservativeVN)
+
+                        // Have we seen a CSE use and made a promise of an exception set?
+                        //
+                        if (desc->defExcSetPromise != vnStore->VNForEmptyExcSet())
                         {
-                            // This candidate has defs with differing conservative VNs
-                            desc->defConservativeVN = ValueNumStore::NoVN;
+                            // The exeception set held in desc->defExcSetPromise must be a subset of theLiberalExcSet
+                            //
+                            if (vnStore->VNExcIsSubset(theLiberalExcSet, desc->defExcSetPromise))
+                            {
+                                // This new def still satisfies any promise made to all the CSE uses that we have
+                                // encountered
+                                //
+
+                                // no update is needed when these are the same VN
+                                if (desc->defExcSetCurrent != theLiberalExcSet)
+                                {
+                                    // We will change the value of desc->defExcSetCurrent to be the intersection of
+                                    // these two sets.
+                                    // This is the set of exceptions that all CSE defs have (that we have visted so far)
+                                    //
+                                    ValueNum intersectionExcSet =
+                                        vnStore->VNExcSetIntersection(desc->defExcSetCurrent, theLiberalExcSet);
+#ifdef DEBUG
+                                    if (this->verbose)
+                                    {
+                                        vnStore->GetVNFunc(desc->defExcSetCurrent, &excSeq);
+                                        printf(">>> defExcSetCurrent is ");
+                                        vnStore->vnDumpExcSeq(this, &excSeq, true);
+                                        printf("\n");
+
+                                        vnStore->GetVNFunc(theLiberalExcSet, &excSeq);
+                                        printf(">>> theLiberalExcSet is ");
+                                        vnStore->vnDumpExcSeq(this, &excSeq, true);
+                                        printf("\n");
+
+                                        if (intersectionExcSet == vnStore->VNForEmptyExcSet())
+                                        {
+                                            printf(">>> the intersectionExcSet is the EmptyExcSet\n");
+                                        }
+                                        else
+                                        {
+                                            vnStore->GetVNFunc(intersectionExcSet, &excSeq);
+                                            printf(">>> the intersectionExcSet is ");
+                                            vnStore->vnDumpExcSeq(this, &excSeq, true);
+                                            printf("\n");
+                                        }
+                                    }
+#endif // DEBUG
+                                    // Change the defExcSetCurrent to be a subset of its prior value
+                                    //
+                                    assert(vnStore->VNExcIsSubset(desc->defExcSetCurrent, intersectionExcSet));
+                                    desc->defExcSetCurrent = intersectionExcSet;
+                                }
+                            }
+                            else // This CSE def doesn't satisfy one of the exceptions already promised to a CSE use
+                            {
+                                // So, we will abandon all CSE promotions for this candidate
+                                //
+                                // We use the marker value of NoVN to indicate that we
+                                // should abandon this CSE candidate
+                                //
+                                desc->defExcSetPromise = ValueNumStore::NoVN;
+                                tree->gtCSEnum         = NO_CSE;
+
+                                JITDUMP(" Abandon - CSE candidate has defs with exception sets that do not satisfy "
+                                        "some CSE use\n");
+                                continue;
+                            }
                         }
+
+                        // Record or update the value of desc->defConservNormVN
+                        //
+                        ValueNum theConservNormVN = vnStore->VNConservativeNormalValue(tree->gtVNPair);
+
+                        // Is defConservNormVN still set to the uninit marker value of VNForNull() ?
+                        if (desc->defConservNormVN == vnStore->VNForNull())
+                        {
+                            // This is the first def that we have visited, set defConservNormVN
+                            desc->defConservNormVN = theConservNormVN;
+                        }
+                        else
+                        {
+                            // Check to see if all defs have the same conservative normal VN
+                            if (theConservNormVN != desc->defConservNormVN)
+                            {
+                                // This candidate has defs with differing conservative normal VNs, mark it with NoVN
+                                desc->defConservNormVN = ValueNumStore::NoVN; // record the marker for differing VNs
+                            }
+                        }
+
+                        // If we get here we have accepted this node as a valid CSE def
 
                         desc->csdDefCount += 1;
                         desc->csdDefWtCnt += stmw;
 
-                        /* Mark the node as a CSE definition */
+                        // Mark the node as a CSE definition
 
                         tree->gtCSEnum = TO_CSE_DEF(tree->gtCSEnum);
 
-                        /* This CSE will be available after this def */
+                        // This CSE becomes available after this def
                         BitVecOps::AddElemD(cseTraits, available_cses, cseBit);
                     }
-#ifdef DEBUG
-                    if (verbose && IS_CSE_INDEX(tree->gtCSEnum))
+                    else // We are visiting a CSE use
                     {
-                        printf(FMT_BB " ", block->bbNum);
-                        printTreeID(tree);
-                        printf(" %s of CSE #%02u [weight=%s]\n", IS_CSE_USE(tree->gtCSEnum) ? "Use" : "Def",
-                               GET_CSE_INDEX(tree->gtCSEnum), refCntWtd2str(stmw));
+                        assert(isUse);
+
+                        // If the CSE use has no requirements for an exception set then we don't have to do anything
+                        // here
+                        //
+                        if (theLiberalExcSet != vnStore->VNForEmptyExcSet())
+                        {
+                            // Are we visiting a use first, before visiting any defs of this CSE?
+                            // This is an atypical case that can occur with a bottom tested loop.
+                            //
+                            // Is defExcSetCurrent still set to the uninit marker value of VNForNull() ?
+                            if (desc->defExcSetCurrent == vnStore->VNForNull())
+                            {
+                                // Update defExcSetPromise, this is our required exception set for all CSE defs
+                                // that we encounter later.
+                                //
+                                // We could see multiple uses before a def, so we require the Union of all exception
+                                // sets
+                                //
+                                desc->defExcSetPromise =
+                                    vnStore->VNExcSetUnion(desc->defExcSetPromise, theLiberalExcSet);
+                            }
+                            else // we have already seen a def for this CSE and defExcSetCurrent is setup
+                            {
+                                if (vnStore->VNExcIsSubset(desc->defExcSetCurrent, theLiberalExcSet))
+                                {
+                                    // The current set of exceptions produced by all CSE defs have (that we have visted
+                                    // so far)
+                                    // meets our requirement
+                                    //
+                                    // Add any exception items to the defExcSetPromise set
+                                    //
+                                    desc->defExcSetPromise =
+                                        vnStore->VNExcSetUnion(desc->defExcSetPromise, theLiberalExcSet);
+                                }
+                            }
+
+                            // At this point defExcSetPromise contains all of the exception items that we can promise
+                            // here.
+                            //
+                            if (!vnStore->VNExcIsSubset(desc->defExcSetPromise, theLiberalExcSet))
+                            {
+                                // We can't safely make this into a CSE use, because this
+                                // CSE use has an exeception set item that is not promised
+                                // by all of our CSE defs.
+                                //
+                                // We will omit this CSE use from the graph and proceed,
+                                // the other uses and defs can still participate in the CSE optimization.
+
+                                // So this can't be a CSE use
+                                tree->gtCSEnum = NO_CSE;
+
+                                JITDUMP(
+                                    " NO_CSE - This use has an exception set item that isn't contained in the defs!\n");
+                                continue;
+                            }
+                        }
+
+                        // When we get here we have accepted this node as a valid CSE use
+
+                        desc->csdUseCount += 1;
+                        desc->csdUseWtCnt += stmw;
                     }
-#endif
                 }
             }
         }
@@ -1160,8 +1405,8 @@ public:
 
             if (!varTypeIsFloating(varTyp))
             {
-                // TODO-1stClassStructs: Remove this; it is here to duplicate previous behavior.
-                // Note that this makes genTypeStSz return 1.
+                // TODO-1stClassStructs: Revisit this; it is here to duplicate previous behavior.
+                // Note that this makes genTypeStSz return 1, but undoing it pessimizes some code.
                 if (varTypeIsStruct(varTyp))
                 {
                     varTyp = TYP_STRUCT;
@@ -1257,8 +1502,9 @@ public:
                 }
 
                 tempMask = BitVecOps::MakeSingleton(m_pCompiler->cseTraits, genCSEnum2bit(dsc->csdIndex));
-                printf("CSE #%02u,cseMask=%s,useCnt=%d: [def=%3u, use=%3u", dsc->csdIndex,
-                       genES2str(m_pCompiler->cseTraits, tempMask), dsc->csdUseCount, def, use);
+                printf("CSE #%02u, {$%-3x, $%-3x} cseMask=%s,useCnt=%d: [def=%3u, use=%3u", dsc->csdIndex,
+                       dsc->csdHashKey, dsc->defExcSetPromise, genES2str(m_pCompiler->cseTraits, tempMask),
+                       dsc->csdUseCount, def, use);
                 printf("] :: ");
                 m_pCompiler->gtDispTree(expr, nullptr, nullptr, true);
             }
@@ -1498,6 +1744,27 @@ public:
         // Each CSE Def will contain two Refs and each CSE Use will have one Ref of this new LclVar
         unsigned cseRefCnt = (candidate->DefCount() * 2) + candidate->UseCount();
 
+        bool      canEnregister = true;
+        unsigned  slotCount     = 1;
+        var_types cseLclVarTyp  = genActualType(candidate->Expr()->TypeGet());
+        if (candidate->Expr()->TypeGet() == TYP_STRUCT)
+        {
+            // This is a non-enregisterable struct.
+            canEnregister                  = false;
+            GenTree*             value     = candidate->Expr();
+            CORINFO_CLASS_HANDLE structHnd = m_pCompiler->gtGetStructHandleIfPresent(candidate->Expr());
+            if (structHnd == NO_CLASS_HANDLE)
+            {
+                JITDUMP("Can't determine the struct size, so we can't consider it for CSE promotion\n");
+                return false; //  Do not make this a CSE
+            }
+
+            unsigned size = m_pCompiler->info.compCompHnd->getClassSize(structHnd);
+            // Note that the slotCount is used to estimate the reference cost, but it may overestimate this
+            // because it doesn't take into account that we might use a vector register for struct copies.
+            slotCount = (size + TARGET_POINTER_SIZE - 1) / TARGET_POINTER_SIZE;
+        }
+
         if (CodeOptKind() == Compiler::SMALL_CODE)
         {
             if (cseRefCnt >= aggressiveRefCnt)
@@ -1508,10 +1775,10 @@ public:
                     printf("Aggressive CSE Promotion (%u >= %u)\n", cseRefCnt, aggressiveRefCnt);
                 }
 #endif
-                cse_def_cost = 1;
-                cse_use_cost = 1;
+                cse_def_cost = slotCount;
+                cse_use_cost = slotCount;
 
-                if (candidate->LiveAcrossCall() != 0)
+                if (candidate->LiveAcrossCall() || !canEnregister)
                 {
                     if (largeFrame)
                     {
@@ -1540,13 +1807,13 @@ public:
 #else                             // _TARGET_ARM_
                 if (hugeFrame)
                 {
-                    cse_def_cost = 12; // movw/movt r10 and str reg,[sp+r10]
-                    cse_use_cost = 12;
+                    cse_def_cost = 10 + (2 * slotCount); // movw/movt r10 and str reg,[sp+r10]
+                    cse_use_cost = 10 + (2 * slotCount);
                 }
                 else
                 {
-                    cse_def_cost = 8; // movw r10 and str reg,[sp+r10]
-                    cse_use_cost = 8;
+                    cse_def_cost = 6 + (2 * slotCount); // movw r10 and str reg,[sp+r10]
+                    cse_use_cost = 6 + (2 * slotCount);
                 }
 #endif
             }
@@ -1560,17 +1827,17 @@ public:
 #endif
 #ifdef _TARGET_XARCH_
                 /* The following formula is good choice when optimizing CSE for SMALL_CODE */
-                cse_def_cost = 3; // mov [EBP-1C],reg
-                cse_use_cost = 2; //     [EBP-1C]
-#else                             // _TARGET_ARM_
-                cse_def_cost = 2; // str reg,[sp+0x9c]
-                cse_use_cost = 2; // ldr reg,[sp+0x9c]
+                cse_def_cost = 3 * slotCount; // mov [EBP-1C],reg
+                cse_use_cost = 2 * slotCount; //     [EBP-1C]
+#else                                         // _TARGET_ARM_
+                cse_def_cost = 2 * slotCount; // str reg,[sp+0x9c]
+                cse_use_cost = 2 * slotCount; // ldr reg,[sp+0x9c]
 #endif
             }
         }
         else // not SMALL_CODE ...
         {
-            if (cseRefCnt >= aggressiveRefCnt)
+            if ((cseRefCnt >= aggressiveRefCnt) && canEnregister)
             {
 #ifdef DEBUG
                 if (m_pCompiler->verbose)
@@ -1578,13 +1845,13 @@ public:
                     printf("Aggressive CSE Promotion (%u >= %u)\n", cseRefCnt, aggressiveRefCnt);
                 }
 #endif
-                cse_def_cost = 1;
-                cse_use_cost = 1;
+                cse_def_cost = slotCount;
+                cse_use_cost = slotCount;
             }
             else if (cseRefCnt >= moderateRefCnt)
             {
 
-                if (candidate->LiveAcrossCall() == 0)
+                if (!candidate->LiveAcrossCall() && canEnregister)
                 {
 #ifdef DEBUG
                     if (m_pCompiler->verbose)
@@ -1596,7 +1863,7 @@ public:
                     cse_def_cost = 2;
                     cse_use_cost = 1;
                 }
-                else // candidate is live across call
+                else // candidate is live across call or not enregisterable.
                 {
 #ifdef DEBUG
                     if (m_pCompiler->verbose)
@@ -1604,15 +1871,15 @@ public:
                         printf("Moderate CSE Promotion (%u >= %u)\n", cseRefCnt, moderateRefCnt);
                     }
 #endif
-                    cse_def_cost   = 2;
-                    cse_use_cost   = 2;
+                    cse_def_cost   = 2 * slotCount;
+                    cse_use_cost   = 2 * slotCount;
                     extra_yes_cost = BB_UNITY_WEIGHT * 2; // Extra cost in case we have to spill/restore a caller
                                                           // saved register
                 }
             }
             else // Conservative CSE promotion
             {
-                if (candidate->LiveAcrossCall() == 0)
+                if (!candidate->LiveAcrossCall() && canEnregister)
                 {
 #ifdef DEBUG
                     if (m_pCompiler->verbose)
@@ -1632,8 +1899,8 @@ public:
                         printf("Conservative CSE Promotion (%u < %u)\n", cseRefCnt, moderateRefCnt);
                     }
 #endif
-                    cse_def_cost   = 3;
-                    cse_use_cost   = 3;
+                    cse_def_cost   = 3 * slotCount;
+                    cse_use_cost   = 3 * slotCount;
                     extra_yes_cost = BB_UNITY_WEIGHT * 4; // Extra cost in case we have to spill/restore a caller
                                                           // saved register
                 }
@@ -1641,8 +1908,8 @@ public:
                 // If we have maxed out lvaTrackedCount then this CSE may end up as an untracked variable
                 if (m_pCompiler->lvaTrackedCount == lclMAX_TRACKED)
                 {
-                    cse_def_cost++;
-                    cse_use_cost++;
+                    cse_def_cost += slotCount;
+                    cse_use_cost += slotCount;
                 }
             }
 
@@ -1715,6 +1982,32 @@ public:
         return result;
     }
 
+    // IsCompatibleType() takes two var_types and returns true if they
+    // are compatible types for CSE substitution
+    //
+    bool IsCompatibleType(var_types cseLclVarTyp, var_types expTyp)
+    {
+        // Exact type match is the expected case
+        if (cseLclVarTyp == expTyp)
+        {
+            return true;
+        }
+
+        // We also allow TYP_BYREF and TYP_I_IMPL as compatible types
+        //
+        if ((cseLclVarTyp == TYP_BYREF) && (expTyp == TYP_I_IMPL))
+        {
+            return true;
+        }
+        if ((cseLclVarTyp == TYP_I_IMPL) && (expTyp == TYP_BYREF))
+        {
+            return true;
+        }
+
+        // Otherwise we have incompatible types
+        return false;
+    }
+
     // PerformCSE() takes a successful candidate and performs  the appropriate replacements:
     //
     // It will replace all of the CSE defs with assignments to a new "cse0" LclVar
@@ -1749,38 +2042,60 @@ public:
         var_types cseLclVarTyp = genActualType(successfulCandidate->Expr()->TypeGet());
         if (varTypeIsStruct(cseLclVarTyp))
         {
-            m_pCompiler->lvaSetStruct(cseLclVarNum, m_pCompiler->gtGetStructHandle(successfulCandidate->Expr()), false);
+            // After call args have been morphed, we don't need a handle for SIMD types.
+            // They are only required where the size is not implicit in the type and/or there are GC refs.
+            CORINFO_CLASS_HANDLE structHnd = m_pCompiler->gtGetStructHandleIfPresent(successfulCandidate->Expr());
+            assert((structHnd != NO_CLASS_HANDLE) || (cseLclVarTyp != TYP_STRUCT));
+            if (structHnd != NO_CLASS_HANDLE)
+            {
+                m_pCompiler->lvaSetStruct(cseLclVarNum, structHnd, false);
+            }
+#ifdef FEATURE_SIMD
+            else if (varTypeIsSIMD(cseLclVarTyp))
+            {
+                m_pCompiler->lvaGetDesc(cseLclVarNum)->lvSIMDType = true;
+            }
+#endif // FEATURE_SIMD
         }
         m_pCompiler->lvaTable[cseLclVarNum].lvType  = cseLclVarTyp;
         m_pCompiler->lvaTable[cseLclVarNum].lvIsCSE = true;
 
-        m_addCSEcount++; // Record that we created a new LclVar for use as a CSE temp
+        // Record that we created a new LclVar for use as a CSE temp
+        m_addCSEcount++;
         m_pCompiler->optCSEcount++;
 
-        ValueNum defConservativeVN = successfulCandidate->CseDsc()->defConservativeVN;
-
-        /*  Walk all references to this CSE, adding an assignment
-            to the CSE temp to all defs and changing all refs to
-            a simple use of the CSE temp.
-
-            We also unmark nested CSE's for all uses.
-        */
-
+        //  Walk all references to this CSE, adding an assignment
+        //  to the CSE temp to all defs and changing all refs to
+        //  a simple use of the CSE temp.
+        //
+        //  Later we will unmark any nested CSE's for the CSE uses.
+        //
+        Compiler::CSEdsc*      dsc = successfulCandidate->CseDsc();
         Compiler::treeStmtLst* lst;
-        lst = successfulCandidate->CseDsc()->csdTreeList;
-        noway_assert(lst);
 
-#define QQQ_CHECK_CSE_VNS 0
-#if QQQ_CHECK_CSE_VNS
-        assert(lst != NULL);
-        ValueNum firstVN = lst->tslTree->gtVN;
-        lst              = lst->tslNext;
-        bool allSame     = true;
-        while (lst != NULL)
+#ifdef DEBUG
+        // Verify that all of the ValueNumbers in this list are correct as
+        // Morph will change them when it performs a mutating operation.
+        //
+        ValueNum firstVN = ValueNumStore::NoVN;
+        ValueNum currVN;
+        bool     allSame = true;
+
+        lst = dsc->csdTreeList;
+        while (lst != nullptr)
         {
+            // Ignore this node if the gtCSEnum value has been cleared
             if (IS_CSE_INDEX(lst->tslTree->gtCSEnum))
             {
-                if (lst->tslTree->gtVN != firstVN)
+                // We used the liberal Value numbers when building the set of CSE
+                currVN = m_pCompiler->vnStore->VNLiberalNormalValue(lst->tslTree->gtVNPair);
+                assert(currVN != ValueNumStore::NoVN);
+
+                if (firstVN == ValueNumStore::NoVN)
+                {
+                    firstVN = currVN;
+                }
+                else if (currVN != firstVN)
                 {
                     allSame = false;
                     break;
@@ -1792,48 +2107,57 @@ public:
         {
             lst                = dsc->csdTreeList;
             GenTree* firstTree = lst->tslTree;
-            printf("In %s, CSE (oper = %s, type = %s) has differing VNs: ", info.compFullName,
+            printf("In %s, CSE (oper = %s, type = %s) has differing VNs: ", m_pCompiler->info.compFullName,
                    GenTree::OpName(firstTree->OperGet()), varTypeName(firstTree->TypeGet()));
-            while (lst != NULL)
+            while (lst != nullptr)
             {
                 if (IS_CSE_INDEX(lst->tslTree->gtCSEnum))
                 {
-                    printf("0x%x(%s,%d)    ", lst->tslTree, IS_CSE_USE(lst->tslTree->gtCSEnum) ? "u" : "d",
-                           lst->tslTree->gtVN);
+                    currVN = m_pCompiler->vnStore->VNLiberalNormalValue(lst->tslTree->gtVNPair);
+                    printf("0x%x(%s " FMT_VN ") ", lst->tslTree, IS_CSE_USE(lst->tslTree->gtCSEnum) ? "use" : "def",
+                           currVN);
                 }
                 lst = lst->tslNext;
             }
             printf("\n");
         }
+#endif // DEBUG
+
+        // Setup 'lst' to point at the start of this candidate list
         lst = dsc->csdTreeList;
-#endif
+        noway_assert(lst);
 
         do
         {
             /* Process the next node in the list */
-            GenTree* exp = lst->tslTree;
-            GenTree* stm = lst->tslStmt;
-            noway_assert(stm->gtOper == GT_STMT);
-            BasicBlock* blk = lst->tslBlock;
+            GenTree*     exp  = lst->tslTree;
+            GenTreeStmt* stmt = lst->tslStmt;
+            BasicBlock*  blk  = lst->tslBlock;
 
             /* Advance to the next node in the list */
             lst = lst->tslNext;
 
-            // Assert if we used DEBUG_DESTROY_NODE on this CSE exp
-            assert(exp->gtOper != GT_COUNT);
-
-            /* Ignore the node if it's not been marked as a CSE */
+            // We may have cleared this CSE in optValuenumCSE_Availablity
+            // due to different exception sets.
+            //
+            // Ignore this node if the gtCSEnum value has been cleared
             if (!IS_CSE_INDEX(exp->gtCSEnum))
             {
                 continue;
             }
+
+            // Assert if we used DEBUG_DESTROY_NODE on this CSE exp
+            assert(exp->gtOper != GT_COUNT);
 
             /* Make sure we update the weighted ref count correctly */
             m_pCompiler->optCSEweight = blk->getBBWeight(m_pCompiler);
 
             /* Figure out the actual type of the value */
             var_types expTyp = genActualType(exp->TypeGet());
-            noway_assert(expTyp == cseLclVarTyp);
+
+            // The cseLclVarType must be a compatible with expTyp
+            //
+            noway_assert(IsCompatibleType(cseLclVarTyp, expTyp));
 
             // This will contain the replacement tree for exp
             // It will either be the CSE def or CSE ref
@@ -1859,22 +2183,27 @@ public:
                 // We will replace the CSE ref with a new tree
                 // this is typically just a simple use of the new CSE LclVar
                 //
-                cse           = m_pCompiler->gtNewLclvNode(cseLclVarNum, cseLclVarTyp);
-                cse->gtVNPair = exp->gtVNPair; // assign the proper Value Numbers
-                if (defConservativeVN != ValueNumStore::NoVN)
+                ValueNumStore* vnStore = m_pCompiler->vnStore;
+                cse                    = m_pCompiler->gtNewLclvNode(cseLclVarNum, cseLclVarTyp);
+
+                // assign the proper ValueNumber, A CSE use discards any exceptions
+                cse->gtVNPair = vnStore->VNPNormalPair(exp->gtVNPair);
+
+                ValueNum theConservativeVN = successfulCandidate->CseDsc()->defConservNormVN;
+
+                if (theConservativeVN != ValueNumStore::NoVN)
                 {
-                    // All defs of this CSE share the same conservative VN, and we are rewriting this
+                    // All defs of this CSE share the same normal conservative VN, and we are rewriting this
                     // use to fetch the same value with no reload, so we can safely propagate that
                     // conservative VN to this use.  This can help range check elimination later on.
-                    cse->gtVNPair.SetConservative(defConservativeVN);
+                    cse->gtVNPair.SetConservative(theConservativeVN);
 
                     // If the old VN was flagged as a checked bound, propagate that to the new VN
                     // to make sure assertion prop will pay attention to this VN.
-                    ValueNumStore* vnStore = m_pCompiler->vnStore;
-                    ValueNum       oldVN   = exp->gtVNPair.GetConservative();
-                    if (!vnStore->IsVNConstant(defConservativeVN) && vnStore->IsVNCheckedBound(oldVN))
+                    ValueNum oldVN = exp->gtVNPair.GetConservative();
+                    if (!vnStore->IsVNConstant(theConservativeVN) && vnStore->IsVNCheckedBound(oldVN))
                     {
-                        vnStore->SetVNIsCheckedBound(defConservativeVN);
+                        vnStore->SetVNIsCheckedBound(theConservativeVN);
                     }
 
                     GenTree* cmp;
@@ -1893,7 +2222,7 @@ public:
                         {
                             // Comparison is against the bound directly.
 
-                            newCmpArgVN = defConservativeVN;
+                            newCmpArgVN = theConservativeVN;
                             vnStore->GetCompareCheckedBound(oldCmpVN, &info);
                         }
                         else
@@ -1903,7 +2232,7 @@ public:
                             assert(vnStore->IsVNCompareCheckedBoundArith(oldCmpVN));
                             vnStore->GetCompareCheckedBoundArithInfo(oldCmpVN, &info);
                             newCmpArgVN = vnStore->VNForFunc(vnStore->TypeOfVN(info.arrOp), (VNFunc)info.arrOper,
-                                                             info.arrOp, defConservativeVN);
+                                                             info.arrOp, theConservativeVN);
                         }
                         ValueNum newCmpVN = vnStore->VNForFunc(vnStore->TypeOfVN(oldCmpVN), (VNFunc)info.cmpOper,
                                                                info.cmpOp, newCmpArgVN);
@@ -1919,12 +2248,13 @@ public:
                 // these are appended to the sideEffList
 
                 // Afterwards the set of nodes in the 'sideEffectList' are preserved and
-                // all other nodes are removed and have their ref counts decremented
+                // all other nodes are removed.
                 //
                 exp->gtCSEnum = NO_CSE; // clear the gtCSEnum field
 
                 GenTree* sideEffList = nullptr;
                 m_pCompiler->gtExtractSideEffList(exp, &sideEffList, GTF_PERSISTENT_SIDE_EFFECTS | GTF_IS_IN_CSE);
+
                 // If we have any side effects or extracted CSE defs then we need to create a GT_COMMA tree instead
                 //
                 if (sideEffList != nullptr)
@@ -1998,14 +2328,26 @@ public:
                 GenTree* val = exp;
 
                 /* Create an assignment of the value to the temp */
-                GenTree* asg = m_pCompiler->gtNewTempAssign(cseLclVarNum, val);
+                GenTree* asg     = m_pCompiler->gtNewTempAssign(cseLclVarNum, val);
+                GenTree* origAsg = asg;
+
+                if (!asg->OperIs(GT_ASG))
+                {
+                    // This can only be the case for a struct in which the 'val' was a COMMA, so
+                    // the assignment is sunk below it.
+                    asg = asg->gtEffectiveVal(true);
+                    noway_assert(origAsg->OperIs(GT_COMMA) && (origAsg == val));
+                }
+                else
+                {
+                    noway_assert(asg->gtOp.gtOp2 == val);
+                }
 
                 // assign the proper Value Numbers
                 asg->gtVNPair.SetBoth(ValueNumStore::VNForVoid()); // The GT_ASG node itself is $VN.Void
                 asg->gtOp.gtOp1->gtVNPair = val->gtVNPair;         // The dest op is the same as 'val'
 
                 noway_assert(asg->gtOp.gtOp1->gtOper == GT_LCL_VAR);
-                noway_assert(asg->gtOp.gtOp2 == val);
 
                 /* Create a reference to the CSE temp */
                 GenTree* ref  = m_pCompiler->gtNewLclvNode(cseLclVarNum, cseLclVarTyp);
@@ -2014,31 +2356,32 @@ public:
                 // If it has a zero-offset field seq, copy annotation to the ref
                 if (hasZeroMapAnnotation)
                 {
-                    m_pCompiler->GetZeroOffsetFieldMap()->Set(ref, fldSeq);
+                    m_pCompiler->fgAddFieldSeqForZeroOffset(ref, fldSeq);
                 }
 
                 /* Create a comma node for the CSE assignment */
-                cse           = m_pCompiler->gtNewOperNode(GT_COMMA, expTyp, asg, ref);
+                cse           = m_pCompiler->gtNewOperNode(GT_COMMA, expTyp, origAsg, ref);
                 cse->gtVNPair = ref->gtVNPair; // The comma's value is the same as 'val'
                                                // as the assignment to the CSE LclVar
                                                // cannot add any new exceptions
             }
 
-            // Walk the statement 'stm' and find the pointer
+            // Walk the statement 'stmt' and find the pointer
             // in the tree is pointing to 'exp'
             //
-            GenTree** link = m_pCompiler->gtFindLink(stm, exp);
+            Compiler::FindLinkData linkData = m_pCompiler->gtFindLink(stmt, exp);
+            GenTree**              link     = linkData.result;
 
 #ifdef DEBUG
             if (link == nullptr)
             {
                 printf("\ngtFindLink failed: stm=");
-                Compiler::printTreeID(stm);
+                Compiler::printTreeID(stmt);
                 printf(", exp=");
                 Compiler::printTreeID(exp);
                 printf("\n");
                 printf("stm =");
-                m_pCompiler->gtDispTree(stm);
+                m_pCompiler->gtDispTree(stmt);
                 printf("\n");
                 printf("exp =");
                 m_pCompiler->gtDispTree(exp);
@@ -2055,13 +2398,13 @@ public:
             // If it has a zero-offset field seq, copy annotation.
             if (hasZeroMapAnnotation)
             {
-                m_pCompiler->GetZeroOffsetFieldMap()->Set(cse, fldSeq);
+                m_pCompiler->fgAddFieldSeqForZeroOffset(cse, fldSeq);
             }
 
             assert(m_pCompiler->fgRemoveRestOfBlock == false);
 
             /* re-morph the statement */
-            m_pCompiler->fgMorphBlockStmt(blk, stm->AsStmt() DEBUGARG("optValnumCSE"));
+            m_pCompiler->fgMorphBlockStmt(blk, stmt DEBUGARG("optValnumCSE"));
 
         } while (lst != nullptr);
     }
@@ -2077,26 +2420,28 @@ public:
         for (; (cnt > 0); cnt--, ptr++)
         {
             Compiler::CSEdsc* dsc = *ptr;
-            CSE_Candidate     candidate(this, dsc);
+            if (dsc->defExcSetPromise == ValueNumStore::NoVN)
+            {
+                JITDUMP("Abandoned CSE #%02u because we had defs with different Exc sets\n");
+                continue;
+            }
+
+            CSE_Candidate candidate(this, dsc);
 
             candidate.InitializeCounts();
 
             if (candidate.UseCount() == 0)
             {
-#ifdef DEBUG
-                if (m_pCompiler->verbose)
-                {
-                    printf("Skipped CSE #%02u because use count is 0\n", candidate.CseIndex());
-                }
-#endif
+                JITDUMP("Skipped CSE #%02u because use count is 0\n", candidate.CseIndex());
                 continue;
             }
 
 #ifdef DEBUG
             if (m_pCompiler->verbose)
             {
-                printf("\nConsidering CSE #%02u [def=%2u, use=%2u, cost=%2u] CSE Expression:\n", candidate.CseIndex(),
-                       candidate.DefCount(), candidate.UseCount(), candidate.Cost());
+                printf("\nConsidering CSE #%02u {$%-3x, $%-3x} [def=%2u, use=%2u, cost=%2u] CSE Expression:\n",
+                       candidate.CseIndex(), dsc->csdHashKey, dsc->defExcSetPromise, candidate.DefCount(),
+                       candidate.UseCount(), candidate.Cost());
                 m_pCompiler->gtDispTree(candidate.Expr());
                 printf("\n");
             }
@@ -2227,16 +2572,17 @@ bool Compiler::optIsCSEcandidate(GenTree* tree)
         return false;
     }
 
-    /* The only reason a TYP_STRUCT tree might occur is as an argument to
-       GT_ADDR. It will never be actually materialized. So ignore them.
-       Also TYP_VOIDs */
-
     var_types  type = tree->TypeGet();
     genTreeOps oper = tree->OperGet();
 
-    // TODO-1stClassStructs: Enable CSE for struct types (depends on either transforming
-    // to use regular assignments, or handling copyObj.
-    if (varTypeIsStruct(type) || type == TYP_VOID)
+    if (type == TYP_VOID)
+    {
+        return false;
+    }
+
+    // If this is a struct type, we can only consider it for CSE-ing if we can get at
+    // its handle, so that we can create a temp.
+    if ((type == TYP_STRUCT) && (gtGetStructHandleIfPresent(tree) == NO_CLASS_HANDLE))
     {
         return false;
     }
@@ -2284,6 +2630,29 @@ bool Compiler::optIsCSEcandidate(GenTree* tree)
     switch (oper)
     {
         case GT_CALL:
+
+            GenTreeCall* call;
+            call = tree->AsCall();
+
+            // Don't mark calls to allocation helpers as CSE candidates.
+            // Marking them as CSE candidates usually blocks CSEs rather than enables them.
+            // A typical case is:
+            // [1] GT_IND(x) = GT_CALL ALLOC_HELPER
+            // ...
+            // [2] y = GT_IND(x)
+            // ...
+            // [3] z = GT_IND(x)
+            // If we mark CALL ALLOC_HELPER as a CSE candidate, we later discover
+            // that it can't be a CSE def because GT_INDs in [2] and [3] can cause
+            // more exceptions (NullRef) so we abandon this CSE.
+            // If we don't mark CALL ALLOC_HELPER as a CSE candidate, we are able
+            // to use GT_IND(x) in [2] as a CSE def.
+            if ((call->gtCallType == CT_HELPER) &&
+                s_helperCallProperties.IsAllocator(eeGetHelperNum(call->gtCallMethHnd)))
+            {
+                return false;
+            }
+
             // If we have a simple helper call with no other persistent side-effects
             // then we allow this tree to be a CSE candidate
             //
@@ -2323,6 +2692,8 @@ bool Compiler::optIsCSEcandidate(GenTree* tree)
 
         case GT_NEG:
         case GT_NOT:
+        case GT_BSWAP:
+        case GT_BSWAP16:
         case GT_CAST:
             return true; // CSE these Unary Operators
 
@@ -2511,27 +2882,17 @@ void Compiler::optOptimizeCSEs()
 
 void Compiler::optCleanupCSEs()
 {
-    // We must clear the BBF_VISITED and BBF_MARKED flags
-    //
-    for (BasicBlock* block = fgFirstBB; block; block = block->bbNext)
+    // We must clear the BBF_VISITED and BBF_MARKED flags.
+    for (BasicBlock* block = fgFirstBB; block != nullptr; block = block->bbNext)
     {
-        // And clear all the "visited" bits on the block
-        //
+        // And clear all the "visited" bits on the block.
         block->bbFlags &= ~(BBF_VISITED | BBF_MARKED);
 
-        /* Walk the statement trees in this basic block */
-
-        GenTree* stmt;
-
-        // Initialize 'stmt' to the first non-Phi statement
-        stmt = block->FirstNonPhiDef();
-
-        for (; stmt; stmt = stmt->gtNext)
+        // Walk the statement trees in this basic block.
+        for (GenTreeStmt* stmt = block->FirstNonPhiDef(); stmt != nullptr; stmt = stmt->getNextStmt())
         {
-            noway_assert(stmt->gtOper == GT_STMT);
-
-            /* We must clear the gtCSEnum field */
-            for (GenTree* tree = stmt->gtStmt.gtStmtExpr; tree; tree = tree->gtPrev)
+            // We must clear the gtCSEnum field.
+            for (GenTree* tree = stmt->gtStmtExpr; tree; tree = tree->gtPrev)
             {
                 tree->gtCSEnum = NO_CSE;
             }
@@ -2553,18 +2914,12 @@ void Compiler::optEnsureClearCSEInfo()
     {
         assert((block->bbFlags & (BBF_VISITED | BBF_MARKED)) == 0);
 
-        /* Walk the statement trees in this basic block */
-
-        GenTree* stmt;
-
         // Initialize 'stmt' to the first non-Phi statement
-        stmt = block->FirstNonPhiDef();
-
-        for (; stmt; stmt = stmt->gtNext)
+        GenTreeStmt* stmt = block->FirstNonPhiDef();
+        // Walk the statement trees in this basic block
+        for (; stmt != nullptr; stmt = stmt->getNextStmt())
         {
-            assert(stmt->gtOper == GT_STMT);
-
-            for (GenTree* tree = stmt->gtStmt.gtStmtExpr; tree; tree = tree->gtPrev)
+            for (GenTree* tree = stmt->gtStmtExpr; tree; tree = tree->gtPrev)
             {
                 assert(tree->gtCSEnum == NO_CSE);
             }

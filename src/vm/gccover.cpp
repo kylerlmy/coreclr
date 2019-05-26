@@ -43,25 +43,33 @@ static void replaceSafePointInstructionWithGcStressInstr(UINT32 safePointOffset,
 static bool replaceInterruptibleRangesWithGcStressInstr (UINT32 startOffset, UINT32 stopOffset, LPVOID codeStart);
 #endif
 
+// There is a call target instruction, try to find the MethodDesc for where target points to.
+// Returns nullptr if it can't find it.
 static MethodDesc* getTargetMethodDesc(PCODE target)
 {
     MethodDesc* targetMD = ExecutionManager::GetCodeMethodDesc(target);
-    if (targetMD == 0) 
+    if (targetMD != nullptr)
     {
-        VirtualCallStubManager::StubKind vsdStubKind = VirtualCallStubManager::SK_UNKNOWN;
-        VirtualCallStubManager *pVSDStubManager = VirtualCallStubManager::FindStubManager(target, &vsdStubKind);
-        if (vsdStubKind != VirtualCallStubManager::SK_BREAKPOINT && vsdStubKind != VirtualCallStubManager::SK_UNKNOWN)
-        {
-            DispatchToken token = VirtualCallStubManager::GetTokenFromStubQuick(pVSDStubManager, target, vsdStubKind);
-            _ASSERTE(token.IsValid());
-            targetMD = VirtualCallStubManager::GetInterfaceMethodDescFromToken(token);
-        }
-        else
-        {
-            targetMD = AsMethodDesc(size_t(MethodDesc::GetMethodDescFromStubAddr(target, TRUE)));
-        }
+        // It is JIT/NGened call.
+        return targetMD;
     }
-    return targetMD;
+
+    VirtualCallStubManager::StubKind vsdStubKind = VirtualCallStubManager::SK_UNKNOWN;
+    VirtualCallStubManager *pVSDStubManager = VirtualCallStubManager::FindStubManager(target, &vsdStubKind);
+    if (vsdStubKind != VirtualCallStubManager::SK_BREAKPOINT && vsdStubKind != VirtualCallStubManager::SK_UNKNOWN)
+    {
+        // It is a VSD stub manager.
+        DispatchToken token(VirtualCallStubManager::GetTokenFromStubQuick(pVSDStubManager, target, vsdStubKind));
+        _ASSERTE(token.IsValid());
+        return VirtualCallStubManager::GetInterfaceMethodDescFromToken(token);
+    }
+    if (RangeSectionStubManager::GetStubKind(target) == STUB_CODE_BLOCK_PRECODE)
+    {
+        // The address looks like a value stub, try to get the method descriptor.
+        return MethodDesc::GetMethodDescFromStubAddr(target, TRUE);
+    }
+
+    return nullptr;
 }
 
 
@@ -74,7 +82,7 @@ void SetupAndSprinkleBreakpoints(
 {
     // Allocate room for the GCCoverageInfo and copy of the method instructions
     size_t memSize = sizeof(GCCoverageInfo) + methodRegionInfo.hotSize + methodRegionInfo.coldSize;
-    GCCoverageInfo* gcCover = (GCCoverageInfo*)(void*) pMD->GetLoaderAllocatorForCode()->GetHighFrequencyHeap()->AllocAlignedMem(memSize, CODE_SIZE_ALIGN);
+    GCCoverageInfo* gcCover = (GCCoverageInfo*)(void*) pMD->GetLoaderAllocator()->GetHighFrequencyHeap()->AllocAlignedMem(memSize, CODE_SIZE_ALIGN);
 
     memset(gcCover, 0, sizeof(GCCoverageInfo));
 
@@ -380,11 +388,7 @@ public:
 //
 // Similarly, inserting breakpoints can be avoided for JIT_PollGC() and JIT_StressGC().
 
-#if defined(_TARGET_ARM_) || defined(_TARGET_AMD64_)
 extern "C" FCDECL0(VOID, JIT_RareDisableHelper);
-#else
-FCDECL0(VOID, JIT_RareDisableHelper);
-#endif
 
 /****************************************************************************/
 /* sprinkle interupt instructions that will stop on every GCSafe location
@@ -528,7 +532,8 @@ void GCCoverageInfo::SprinkleBreakpoints(
 
         if (prevDirectCallTargetMD != 0)
         {
-            if (prevDirectCallTargetMD->ReturnsObject(true) != MetaSig::RETNONOBJ)
+            ReturnKind returnKind = prevDirectCallTargetMD->GetReturnKind(true);
+            if (IsPointerReturnKind(returnKind))
                 *cur = INTERRUPT_INSTR_PROTECT_RET;  
             else
                 *cur = INTERRUPT_INSTR;
@@ -755,16 +760,16 @@ void replaceSafePointInstructionWithGcStressInstr(UINT32 safePointOffset, LPVOID
                 // never requires restore, however it is possible that it is initially in an invalid state
                 // and remains invalid until one or more eager fixups are applied.
                 //
-                // MethodDesc::ReturnsObject() consults the method signature, meaning it consults the
+                // GetReturnKind consults the method signature, meaning it consults the
                 // metadata in the owning module.  For generic instantiations stored in non-preferred
                 // modules, reaching the owning module requires following the module override pointer for
                 // the enclosing MethodTable.  In this case, the module override pointer is generally
                 // invalid until an associated eager fixup is applied.
                 //
-                // In situations like this, MethodDesc::ReturnsObject() will try to dereference an
+                // In situations like this, GetReturnKind will try to dereference an
                 // unresolved fixup and will AV.
                 //
-                // Given all of this, skip the MethodDesc::ReturnsObject() call by default to avoid
+                // Given all of this, skip the GetReturnKind call by default to avoid
                 // unexpected AVs.  This implies leaving out the GC coverage breakpoints for direct calls
                 // unless COMPlus_GcStressOnDirectCalls=1 is explicitly set in the environment.
                 //
@@ -773,8 +778,10 @@ void replaceSafePointInstructionWithGcStressInstr(UINT32 safePointOffset, LPVOID
 
                 if (fGcStressOnDirectCalls.val(CLRConfig::INTERNAL_GcStressOnDirectCalls))
                 {
+                    ReturnKind returnKind = targetMD->GetReturnKind(true);
+
                     // If the method returns an object then should protect the return object
-                    if (targetMD->ReturnsObject(true) != MetaSig::RETNONOBJ)
+                    if (IsPointerReturnKind(returnKind))
                     {
                         // replace with corresponding 2 or 4 byte illegal instruction (which roots the return value)
 #if defined(_TARGET_ARM_)
@@ -1273,8 +1280,6 @@ void RemoveGcCoverageInterrupt(TADDR instrPtr, BYTE * savedInstrPtr)
 
 BOOL OnGcCoverageInterrupt(PCONTEXT regs)
 {
-    SO_NOT_MAINLINE_FUNCTION;
-
     // So that you can set counted breakpoint easily;
     GCcoverCount++;
     forceStack[0]= &regs;                // This is so I can see it fastchecked
@@ -1605,17 +1610,16 @@ void DoGcStress (PCONTEXT regs, MethodDesc *pMD)
 
                 if (targetMD != 0)
                 {
-                    // Mark that we are performing a stackwalker like operation on the current thread.
-                    // This is necessary to allow the ReturnsObject function to work without triggering any loads
-                    ClrFlsValueSwitch _threadStackWalking(TlsIdx_StackWalkerWalkingThread, pThread);
-
                     // @Todo: possible race here, might need to be fixed  if it become a problem.
                     // It could become a problem if 64bit does partially interrupt work.
                     // OK, we have the MD, mark the instruction after the CALL
                     // appropriately
+
+                    ReturnKind returnKind = targetMD->GetReturnKind(true);
+                    bool protectReturn = IsPointerReturnKind(returnKind);
 #ifdef _TARGET_ARM_
                     size_t instrLen = GetARMInstructionLength(nextInstr);
-                    if (targetMD->ReturnsObject(true) != MetaSig::RETNONOBJ)
+                    if (protectReturn)
                         if (instrLen == 2)
                             *(WORD*)nextInstr  = INTERRUPT_INSTR_PROTECT_RET;
                         else
@@ -1626,12 +1630,12 @@ void DoGcStress (PCONTEXT regs, MethodDesc *pMD)
                         else
                             *(DWORD*)nextInstr = INTERRUPT_INSTR_32;
 #elif defined(_TARGET_ARM64_)
-                    if (targetMD->ReturnsObject(true) != MetaSig::RETNONOBJ)
+                    if (protectReturn)
                         *(DWORD *)nextInstr = INTERRUPT_INSTR_PROTECT_RET;  
                     else
                         *(DWORD *)nextInstr = INTERRUPT_INSTR;
 #else
-                    if (targetMD->ReturnsObject(true) != MetaSig::RETNONOBJ)
+                    if (protectReturn)
                         *nextInstr = INTERRUPT_INSTR_PROTECT_RET;  
                     else
                         *nextInstr = INTERRUPT_INSTR;

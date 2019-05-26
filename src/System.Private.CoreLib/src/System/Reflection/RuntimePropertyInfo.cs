@@ -14,17 +14,17 @@ namespace System.Reflection
     {
         #region Private Data Members
         private int m_token;
-        private string m_name;
+        private string? m_name;
         private void* m_utf8name;
         private PropertyAttributes m_flags;
         private RuntimeTypeCache m_reflectedTypeCache;
-        private RuntimeMethodInfo m_getterMethod;
-        private RuntimeMethodInfo m_setterMethod;
-        private MethodInfo[] m_otherMethod;
+        private RuntimeMethodInfo? m_getterMethod;
+        private RuntimeMethodInfo? m_setterMethod;
+        private MethodInfo[]? m_otherMethod;
         private RuntimeType m_declaringType;
         private BindingFlags m_bindingFlags;
-        private Signature m_signature;
-        private ParameterInfo[] m_parameters;
+        private Signature? m_signature;
+        private ParameterInfo[]? m_parameters;
         #endregion
 
         #region Constructor
@@ -44,7 +44,7 @@ namespace System.Reflection
             ConstArray sig;
             scope.GetPropertyProps(tkProperty, out m_utf8name, out m_flags, out sig);
 
-            RuntimeMethodInfo dummy;
+            RuntimeMethodInfo? dummy;
             Associates.AssignAssociates(scope, tkProperty, declaredType, reflectedTypeCache.GetRuntimeType(),
                 out dummy, out dummy, out dummy,
                 out m_getterMethod, out m_setterMethod, out m_otherMethod,
@@ -53,11 +53,11 @@ namespace System.Reflection
         #endregion
 
         #region Internal Members
-        internal override bool CacheEquals(object o)
+        internal override bool CacheEquals(object? o)
         {
-            RuntimePropertyInfo m = o as RuntimePropertyInfo;
+            RuntimePropertyInfo? m = o as RuntimePropertyInfo;
 
-            if ((object)m == null)
+            if (m is null)
                 return false;
 
             return m.m_token == m_token &&
@@ -122,22 +122,18 @@ namespace System.Reflection
         #region Object Overrides
         public override string ToString()
         {
-            return FormatNameAndSig(false);
-        }
+            var sbName = new ValueStringBuilder(MethodBase.MethodNameBufferSize);
 
-        private string FormatNameAndSig(bool serialization)
-        {
-            StringBuilder sbName = new StringBuilder(PropertyType.FormatTypeName(serialization));
-
-            sbName.Append(" ");
+            sbName.Append(PropertyType.FormatTypeName());
+            sbName.Append(' ');
             sbName.Append(Name);
 
             RuntimeType[] arguments = Signature.Arguments;
             if (arguments.Length > 0)
             {
                 sbName.Append(" [");
-                sbName.Append(MethodBase.ConstructParameters(arguments, Signature.CallingConvention, serialization));
-                sbName.Append("]");
+                MethodBase.AppendParameters(ref sbName, arguments, Signature.CallingConvention);
+                sbName.Append(']');
             }
 
             return sbName.ToString();
@@ -147,7 +143,7 @@ namespace System.Reflection
         #region ICustomAttributeProvider
         public override object[] GetCustomAttributes(bool inherit)
         {
-            return CustomAttribute.GetCustomAttributes(this, typeof(object) as RuntimeType);
+            return CustomAttribute.GetCustomAttributes(this, (typeof(object) as RuntimeType)!);
         }
 
         public override object[] GetCustomAttributes(Type attributeType, bool inherit)
@@ -155,7 +151,7 @@ namespace System.Reflection
             if (attributeType == null)
                 throw new ArgumentNullException(nameof(attributeType));
 
-            RuntimeType attributeRuntimeType = attributeType.UnderlyingSystemType as RuntimeType;
+            RuntimeType? attributeRuntimeType = attributeType.UnderlyingSystemType as RuntimeType;
 
             if (attributeRuntimeType == null)
                 throw new ArgumentException(SR.Arg_MustBeType, nameof(attributeType));
@@ -168,7 +164,7 @@ namespace System.Reflection
             if (attributeType == null)
                 throw new ArgumentNullException(nameof(attributeType));
 
-            RuntimeType attributeRuntimeType = attributeType.UnderlyingSystemType as RuntimeType;
+            RuntimeType? attributeRuntimeType = attributeType.UnderlyingSystemType as RuntimeType;
 
             if (attributeRuntimeType == null)
                 throw new ArgumentException(SR.Arg_MustBeType, nameof(attributeType));
@@ -194,7 +190,7 @@ namespace System.Reflection
                 return m_name;
             }
         }
-        public override Type DeclaringType
+        public override Type? DeclaringType
         {
             get
             {
@@ -204,7 +200,7 @@ namespace System.Reflection
 
         public sealed override bool HasSameMetadataDefinitionAs(MemberInfo other) => HasSameMetadataDefinitionAsCore<RuntimePropertyInfo>(other);
 
-        public override Type ReflectedType
+        public override Type? ReflectedType
         {
             get
             {
@@ -224,6 +220,7 @@ namespace System.Reflection
 
         public override Module Module { get { return GetRuntimeModule(); } }
         internal RuntimeModule GetRuntimeModule() { return m_declaringType.GetRuntimeModule(); }
+        public override bool IsCollectible => m_declaringType.IsCollectible;
         #endregion
 
         #region PropertyInfo Overrides
@@ -242,13 +239,13 @@ namespace System.Reflection
 
         internal object GetConstantValue(bool raw)
         {
-            object defaultValue = MdConstant.GetValue(GetRuntimeModule().MetadataImport, m_token, PropertyType.GetTypeHandleInternal(), raw);
+            object? defaultValue = MdConstant.GetValue(GetRuntimeModule().MetadataImport, m_token, PropertyType.GetTypeHandleInternal(), raw);
 
             if (defaultValue == DBNull.Value)
                 // Arg_EnumLitValueNotFound -> "Literal value was not found."
                 throw new InvalidOperationException(SR.Arg_EnumLitValueNotFound);
 
-            return defaultValue;
+            return defaultValue!;
         }
 
         public override object GetConstantValue() { return GetConstantValue(false); }
@@ -260,12 +257,12 @@ namespace System.Reflection
             List<MethodInfo> accessorList = new List<MethodInfo>();
 
             if (Associates.IncludeAccessor(m_getterMethod, nonPublic))
-                accessorList.Add(m_getterMethod);
+                accessorList.Add(m_getterMethod!);
 
             if (Associates.IncludeAccessor(m_setterMethod, nonPublic))
-                accessorList.Add(m_setterMethod);
+                accessorList.Add(m_setterMethod!);
 
-            if ((object)m_otherMethod != null)
+            if ((object?)m_otherMethod != null)
             {
                 for (int i = 0; i < m_otherMethod.Length; i++)
                 {
@@ -281,7 +278,7 @@ namespace System.Reflection
             get { return Signature.ReturnType; }
         }
 
-        public override MethodInfo GetGetMethod(bool nonPublic)
+        public override MethodInfo? GetGetMethod(bool nonPublic)
         {
             if (!Associates.IncludeAccessor(m_getterMethod, nonPublic))
                 return null;
@@ -289,7 +286,7 @@ namespace System.Reflection
             return m_getterMethod;
         }
 
-        public override MethodInfo GetSetMethod(bool nonPublic)
+        public override MethodInfo? GetSetMethod(bool nonPublic)
         {
             if (!Associates.IncludeAccessor(m_setterMethod, nonPublic))
                 return null;
@@ -308,7 +305,7 @@ namespace System.Reflection
 
             ParameterInfo[] ret = new ParameterInfo[numParams];
 
-            Array.Copy(indexParams, ret, numParams);
+            Array.Copy(indexParams, 0, ret, 0, numParams);
 
             return ret;
         }
@@ -321,10 +318,10 @@ namespace System.Reflection
             if (m_parameters == null)
             {
                 int numParams = 0;
-                ParameterInfo[] methParams = null;
+                ParameterInfo[]? methParams = null;
 
                 // First try to get the Get method.
-                MethodInfo m = GetGetMethod(true);
+                MethodInfo? m = GetGetMethod(true);
                 if (m != null)
                 {
                     // There is a Get method so use it.
@@ -349,7 +346,7 @@ namespace System.Reflection
                 ParameterInfo[] propParams = new ParameterInfo[numParams];
 
                 for (int i = 0; i < numParams; i++)
-                    propParams[i] = new RuntimeParameterInfo((RuntimeParameterInfo)methParams[i], this);
+                    propParams[i] = new RuntimeParameterInfo((RuntimeParameterInfo)methParams![i], this);
 
                 m_parameters = propParams;
             }
@@ -385,7 +382,7 @@ namespace System.Reflection
         #region Dynamic
         [DebuggerStepThroughAttribute]
         [Diagnostics.DebuggerHidden]
-        public override object GetValue(object obj, object[] index)
+        public override object? GetValue(object? obj, object?[]? index)
         {
             return GetValue(obj, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static,
                 null, index, null);
@@ -393,9 +390,9 @@ namespace System.Reflection
 
         [DebuggerStepThroughAttribute]
         [Diagnostics.DebuggerHidden]
-        public override object GetValue(object obj, BindingFlags invokeAttr, Binder binder, object[] index, CultureInfo culture)
+        public override object? GetValue(object? obj, BindingFlags invokeAttr, Binder? binder, object?[]? index, CultureInfo? culture)
         {
-            MethodInfo m = GetGetMethod(true);
+            MethodInfo? m = GetGetMethod(true);
             if (m == null)
                 throw new ArgumentException(System.SR.Arg_GetMethNotFnd);
             return m.Invoke(obj, invokeAttr, binder, index, null);
@@ -403,7 +400,7 @@ namespace System.Reflection
 
         [DebuggerStepThroughAttribute]
         [Diagnostics.DebuggerHidden]
-        public override void SetValue(object obj, object value, object[] index)
+        public override void SetValue(object? obj, object? value, object[]? index)
         {
             SetValue(obj,
                     value,
@@ -415,14 +412,14 @@ namespace System.Reflection
 
         [DebuggerStepThroughAttribute]
         [Diagnostics.DebuggerHidden]
-        public override void SetValue(object obj, object value, BindingFlags invokeAttr, Binder binder, object[] index, CultureInfo culture)
+        public override void SetValue(object? obj, object? value, BindingFlags invokeAttr, Binder? binder, object[]? index, CultureInfo? culture)
         {
-            MethodInfo m = GetSetMethod(true);
+            MethodInfo? m = GetSetMethod(true);
 
             if (m == null)
                 throw new ArgumentException(System.SR.Arg_SetMethNotFnd);
 
-            object[] args = null;
+            object?[]? args = null;
 
             if (index != null)
             {

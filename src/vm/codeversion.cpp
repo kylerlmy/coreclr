@@ -25,18 +25,18 @@
 // versioning information
 //
 
-NativeCodeVersion::NativeCodeVersion(const NativeCodeVersion & rhs) : m_pMethod(rhs.m_pMethod) {}
-NativeCodeVersion::NativeCodeVersion(PTR_MethodDesc pMethod) : m_pMethod(pMethod) {}
-BOOL NativeCodeVersion::IsNull() const { return m_pMethod == NULL; }
-PTR_MethodDesc NativeCodeVersion::GetMethodDesc() const { return m_pMethod; }
-PCODE NativeCodeVersion::GetNativeCode() const { return m_pMethod->GetNativeCode(); }
+NativeCodeVersion::NativeCodeVersion(const NativeCodeVersion & rhs) : m_pMethodDesc(rhs.m_pMethodDesc) {}
+NativeCodeVersion::NativeCodeVersion(PTR_MethodDesc pMethod) : m_pMethodDesc(pMethod) {}
+BOOL NativeCodeVersion::IsNull() const { return m_pMethodDesc == NULL; }
+PTR_MethodDesc NativeCodeVersion::GetMethodDesc() const { return m_pMethodDesc; }
+PCODE NativeCodeVersion::GetNativeCode() const { return m_pMethodDesc->GetNativeCode(); }
 NativeCodeVersionId NativeCodeVersion::GetVersionId() const { return 0; }
-ReJITID NativeCodeVersion::GetILCodeVersionId() const; { return 0; }
-ILCodeVersion NativeCodeVersion::GetILCodeVersion() const { return ILCodeVersion(m_pMethod); }
+// ReJITID NativeCodeVersion::GetILCodeVersionId() const; { return 0; }
+// ILCodeVersion NativeCodeVersion::GetILCodeVersion() const { return ILCodeVersion(m_pMethodDesc); }
 #ifndef DACCESS_COMPILE
-BOOL NativeCodeVersion::SetNativeCodeInterlocked(PCODE pCode, PCODE pExpected) { return m_pMethod->SetNativeCodeInterlocked(pCode, pExpected); }
+BOOL NativeCodeVersion::SetNativeCodeInterlocked(PCODE pCode, PCODE pExpected) { return m_pMethodDesc->SetNativeCodeInterlocked(pCode, pExpected); }
 #endif
-bool NativeCodeVersion::operator==(const NativeCodeVersion & rhs) const { return m_pMethod == rhs.m_pMethod; }
+bool NativeCodeVersion::operator==(const NativeCodeVersion & rhs) const { return m_pMethodDesc == rhs.m_pMethodDesc; }
 bool NativeCodeVersion::operator!=(const NativeCodeVersion & rhs) const { return !operator==(rhs); }
 
 
@@ -47,16 +47,23 @@ bool NativeCodeVersion::operator!=(const NativeCodeVersion & rhs) const { return
 // it is a bug. Corerror.xml has a comment in it reserving this value for our use but it doesn't
 // appear in the public headers.
 
-#define CORPROF_E_RUNTIME_SUSPEND_REQUIRED 0x80131381
+#define CORPROF_E_RUNTIME_SUSPEND_REQUIRED _HRESULT_TYPEDEF_(0x80131381L)
 
 #ifndef DACCESS_COMPILE
-NativeCodeVersionNode::NativeCodeVersionNode(NativeCodeVersionId id, MethodDesc* pMethodDesc, ReJITID parentId) :
+NativeCodeVersionNode::NativeCodeVersionNode(
+    NativeCodeVersionId id,
+    MethodDesc* pMethodDesc,
+    ReJITID parentId,
+    NativeCodeVersion::OptimizationTier optimizationTier)
+    :
     m_pNativeCode(NULL),
     m_pMethodDesc(pMethodDesc),
     m_parentId(parentId),
     m_pNextMethodDescSibling(NULL),
     m_id(id),
-    m_optTier(NativeCodeVersion::OptimizationTier0),
+#ifdef FEATURE_TIERED_COMPILATION
+    m_optTier(optimizationTier),
+#endif
     m_flags(0)
 {}
 #endif
@@ -140,18 +147,23 @@ void NativeCodeVersionNode::SetActiveChildFlag(BOOL isActive)
 
 
 #ifdef FEATURE_TIERED_COMPILATION
+
 NativeCodeVersion::OptimizationTier NativeCodeVersionNode::GetOptimizationTier() const
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    return m_optTier.Load();
+    return m_optTier;
 }
+
 #ifndef DACCESS_COMPILE
 void NativeCodeVersionNode::SetOptimizationTier(NativeCodeVersion::OptimizationTier tier)
 {
-    LIMITED_METHOD_DAC_CONTRACT;
-    m_optTier.Store(tier);
+    LIMITED_METHOD_CONTRACT;
+    _ASSERTE(tier >= m_optTier);
+
+    m_optTier = tier;
 }
 #endif
+
 #endif // FEATURE_TIERED_COMPILATION
 
 NativeCodeVersion::NativeCodeVersion() :
@@ -327,6 +339,7 @@ MethodDescVersioningState* NativeCodeVersion::GetMethodDescVersioningState()
 #endif
 
 #ifdef FEATURE_TIERED_COMPILATION
+
 NativeCodeVersion::OptimizationTier NativeCodeVersion::GetOptimizationTier() const
 {
     LIMITED_METHOD_DAC_CONTRACT;
@@ -336,24 +349,26 @@ NativeCodeVersion::OptimizationTier NativeCodeVersion::GetOptimizationTier() con
     }
     else
     {
-        return NativeCodeVersion::OptimizationTier0;
+        return TieredCompilationManager::GetInitialOptimizationTier(GetMethodDesc());
     }
 }
 
 #ifndef DACCESS_COMPILE
-void NativeCodeVersion::SetOptimizationTier(NativeCodeVersion::OptimizationTier tier)
+void NativeCodeVersion::SetOptimizationTier(OptimizationTier tier)
 {
-    LIMITED_METHOD_CONTRACT;
+    WRAPPER_NO_CONTRACT;
     if (m_storageKind == StorageKind::Explicit)
     {
         AsNode()->SetOptimizationTier(tier);
     }
     else
     {
-        _ASSERTE(!"Do not call SetOptimizationTier on default code versions - these versions are immutable");
+        // State changes should have been made previously such that the initial tier is the new tier
+        _ASSERTE(TieredCompilationManager::GetInitialOptimizationTier(GetMethodDesc()) == tier);
     }
 }
 #endif
+
 #endif
 
 PTR_NativeCodeVersionNode NativeCodeVersion::AsNode() const
@@ -565,7 +580,14 @@ ReJITID ILCodeVersionNode::GetVersionId() const
 ILCodeVersion::RejitFlags ILCodeVersionNode::GetRejitState() const
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    return m_rejitState.Load();
+    return static_cast<ILCodeVersion::RejitFlags>(m_rejitState.Load() & ILCodeVersion::kStateMask);
+}
+
+BOOL ILCodeVersionNode::GetEnableReJITCallback() const
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    return (m_rejitState.Load() & ILCodeVersion::kSuppressParams) == ILCodeVersion::kSuppressParams;
 }
 
 PTR_COR_ILMETHOD ILCodeVersionNode::GetIL() const
@@ -598,7 +620,29 @@ PTR_ILCodeVersionNode ILCodeVersionNode::GetNextILVersionNode() const
 void ILCodeVersionNode::SetRejitState(ILCodeVersion::RejitFlags newState)
 {
     LIMITED_METHOD_CONTRACT;
-    m_rejitState.Store(newState);
+    // We're doing a non thread safe modification to m_rejitState
+    _ASSERTE(LockOwnedByCurrentThread());
+
+    ILCodeVersion::RejitFlags oldNonMaskFlags = 
+        static_cast<ILCodeVersion::RejitFlags>(m_rejitState.Load() & ~ILCodeVersion::kStateMask);
+    m_rejitState.Store(static_cast<ILCodeVersion::RejitFlags>(newState | oldNonMaskFlags));
+}
+
+void ILCodeVersionNode::SetEnableReJITCallback(BOOL state)
+{
+    LIMITED_METHOD_CONTRACT;
+    // We're doing a non thread safe modification to m_rejitState
+    _ASSERTE(LockOwnedByCurrentThread());
+
+    ILCodeVersion::RejitFlags oldFlags = m_rejitState.Load();
+    if (state)
+    {
+        m_rejitState.Store(static_cast<ILCodeVersion::RejitFlags>(oldFlags | ILCodeVersion::kSuppressParams));
+    }
+    else
+    {
+        m_rejitState.Store(static_cast<ILCodeVersion::RejitFlags>(oldFlags & ~ILCodeVersion::kSuppressParams));
+    }
 }
 
 void ILCodeVersionNode::SetIL(COR_ILMETHOD* pIL)
@@ -769,6 +813,19 @@ ILCodeVersion::RejitFlags ILCodeVersion::GetRejitState() const
     }
 }
 
+BOOL ILCodeVersion::GetEnableReJITCallback() const
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+    if (m_storageKind == StorageKind::Explicit)
+    {
+        return AsNode()->GetEnableReJITCallback();
+    }
+    else
+    {
+        return FALSE;
+    }
+}
+
 PTR_COR_ILMETHOD ILCodeVersion::GetIL() const
 {
     CONTRACTL
@@ -863,6 +920,12 @@ void ILCodeVersion::SetRejitState(RejitFlags newState)
     AsNode()->SetRejitState(newState);
 }
 
+void ILCodeVersion::SetEnableReJITCallback(BOOL state)
+{
+    LIMITED_METHOD_CONTRACT;
+    return AsNode()->SetEnableReJITCallback(state);
+}
+
 void ILCodeVersion::SetIL(COR_ILMETHOD* pIL)
 {
     LIMITED_METHOD_CONTRACT;
@@ -881,11 +944,14 @@ void ILCodeVersion::SetInstrumentedILMap(SIZE_T cMap, COR_IL_MAP * rgMap)
     AsNode()->SetInstrumentedILMap(cMap, rgMap);
 }
 
-HRESULT ILCodeVersion::AddNativeCodeVersion(MethodDesc* pClosedMethodDesc, NativeCodeVersion* pNativeCodeVersion)
+HRESULT ILCodeVersion::AddNativeCodeVersion(
+    MethodDesc* pClosedMethodDesc,
+    NativeCodeVersion::OptimizationTier optimizationTier,
+    NativeCodeVersion* pNativeCodeVersion)
 {
     LIMITED_METHOD_CONTRACT;
     CodeVersionManager* pManager = GetModule()->GetCodeVersionManager();
-    HRESULT hr = pManager->AddNativeCodeVersion(*this, pClosedMethodDesc, pNativeCodeVersion);
+    HRESULT hr = pManager->AddNativeCodeVersion(*this, pClosedMethodDesc, optimizationTier, pNativeCodeVersion);
     if (FAILED(hr))
     {
         _ASSERTE(hr == E_OUTOFMEMORY);
@@ -901,7 +967,9 @@ HRESULT ILCodeVersion::GetOrCreateActiveNativeCodeVersion(MethodDesc* pClosedMet
     NativeCodeVersion activeNativeChild = GetActiveNativeCodeVersion(pClosedMethodDesc);
     if (activeNativeChild.IsNull())
     {
-        if (FAILED(hr = AddNativeCodeVersion(pClosedMethodDesc, &activeNativeChild)))
+        NativeCodeVersion::OptimizationTier optimizationTier =
+            TieredCompilationManager::GetInitialOptimizationTier(pClosedMethodDesc);
+        if (FAILED(hr = AddNativeCodeVersion(pClosedMethodDesc, optimizationTier, &activeNativeChild)))
         {
             _ASSERTE(hr == E_OUTOFMEMORY);
             return hr;
@@ -1113,7 +1181,7 @@ HRESULT MethodDescVersioningState::SyncJumpStamp(NativeCodeVersion nativeCodeVer
     HRESULT hr = S_OK;
     PCODE pCode = nativeCodeVersion.IsNull() ? NULL : nativeCodeVersion.GetNativeCode();
     MethodDesc* pMethod = GetMethodDesc();
-    _ASSERTE(pMethod->IsVersionable() && pMethod->IsVersionableWithJumpStamp());
+    _ASSERTE(pMethod->IsVersionableWithJumpStamp());
 
     if (!pMethod->HasNativeCode())
     {
@@ -1288,7 +1356,7 @@ HRESULT MethodDescVersioningState::JumpStampNativeCode(PCODE pCode /* = NULL */)
     // revert.
     if (GetJumpStampState() == JumpStampNone)
     {
-        for (int i = 0; i < sizeof(m_rgSavedCode); i++)
+        for (unsigned int i = 0; i < sizeof(m_rgSavedCode); i++)
         {
             m_rgSavedCode[i] = *FirstCodeByteAddr(pbCode + i, DebuggerController::GetPatchTable()->GetPatch((CORDB_ADDRESS_TYPE *)(pbCode + i)));
         }
@@ -1393,7 +1461,7 @@ HRESULT MethodDescVersioningState::UpdateJumpTarget(BOOL fEESuspended, PCODE pRe
     // revert.
     if (GetJumpStampState() == JumpStampNone)
     {
-        for (int i = 0; i < sizeof(m_rgSavedCode); i++)
+        for (unsigned int i = 0; i < sizeof(m_rgSavedCode); i++)
         {
             m_rgSavedCode[i] = *FirstCodeByteAddr(pbCode + i, DebuggerController::GetPatchTable()->GetPatch((CORDB_ADDRESS_TYPE *)(pbCode + i)));
         }
@@ -1532,7 +1600,7 @@ HRESULT MethodDescVersioningState::UndoJumpStampNativeCode(BOOL fEESuspended)
 //         (fContentionPossible == TRUE)
 //      This method will attempt to alter the jump-stamp even if the caller has not prevented
 //      contention, but there is no guarantee it will be succesful. When the caller has prevented
-//      contention, then success is assured. Callers may oportunistically try without
+//      contention, then success is assured. Callers may opportunistically try without
 //      EE suspension, and then upgrade to EE suspension if the first attempt fails. 
 //
 // Assumptions:
@@ -1620,7 +1688,7 @@ HRESULT MethodDescVersioningState::UpdateJumpStampHelper(BYTE* pbCode, INT64 i64
 
         // PERF: we might still want a faster path through here if we aren't debugging that doesn't do
         // all the patch checks
-        for (int i = 0; i < MethodDescVersioningState::JumpStubSize; i++)
+        for (unsigned int i = 0; i < MethodDescVersioningState::JumpStubSize; i++)
         {
             *FirstCodeByteAddr(pbCode + i, DebuggerController::GetPatchTable()->GetPatch(pbCode + i)) = ((BYTE*)&i64NewValue)[i];
         }
@@ -1740,14 +1808,10 @@ CodeVersionManager::CodeVersionManager()
 //---------------------------------------------------------------------------------------
 //
 // Called from BaseDomain::BaseDomain to do any constructor-time initialization.
-// Presently, this takes care of initializing the Crst, choosing the type based on
-// whether this ReJitManager belongs to the SharedDomain.
+// Presently, this takes care of initializing the Crst.
 //
-// Arguments:
-//    * fSharedDomain - nonzero iff this ReJitManager belongs to the SharedDomain.
-//    
 
-void CodeVersionManager::PreInit(BOOL fSharedDomain)
+void CodeVersionManager::PreInit()
 {
     CONTRACTL
     {
@@ -1760,7 +1824,7 @@ void CodeVersionManager::PreInit(BOOL fSharedDomain)
 
 #ifndef DACCESS_COMPILE
     m_crstTable.Init(
-        fSharedDomain ? CrstReJITSharedDomainTable : CrstReJITDomainTable,
+        CrstReJITDomainTable,
         CrstFlags(CRST_UNSAFE_ANYMODE | CRST_DEBUGGER_THREAD | CRST_REENTRANCY | CRST_TAKEN_DURING_SHUTDOWN));
 #endif // DACCESS_COMPILE
 }
@@ -2098,7 +2162,11 @@ HRESULT CodeVersionManager::SetActiveILCodeVersions(ILCodeVersion* pActiveVersio
     return S_OK;
 }
 
-HRESULT CodeVersionManager::AddNativeCodeVersion(ILCodeVersion ilCodeVersion, MethodDesc* pClosedMethodDesc, NativeCodeVersion* pNativeCodeVersion)
+HRESULT CodeVersionManager::AddNativeCodeVersion(
+    ILCodeVersion ilCodeVersion,
+    MethodDesc* pClosedMethodDesc,
+    NativeCodeVersion::OptimizationTier optimizationTier,
+    NativeCodeVersion* pNativeCodeVersion)
 {
     LIMITED_METHOD_CONTRACT;
     _ASSERTE(LockOwnedByCurrentThread());
@@ -2112,7 +2180,7 @@ HRESULT CodeVersionManager::AddNativeCodeVersion(ILCodeVersion ilCodeVersion, Me
     }
 
     NativeCodeVersionId newId = pMethodVersioningState->AllocateVersionId();
-    NativeCodeVersionNode* pNativeCodeVersionNode = new (nothrow) NativeCodeVersionNode(newId, pClosedMethodDesc, ilCodeVersion.GetVersionId());
+    NativeCodeVersionNode* pNativeCodeVersionNode = new (nothrow) NativeCodeVersionNode(newId, pClosedMethodDesc, ilCodeVersion.GetVersionId(), optimizationTier);
     if (pNativeCodeVersionNode == NULL)
     {
         return E_OUTOFMEMORY;
@@ -2145,7 +2213,6 @@ PCODE CodeVersionManager::PublishVersionableCodeIfNecessary(MethodDesc* pMethodD
 
     HRESULT hr = S_OK;
     PCODE pCode = NULL;
-    BOOL fIsJumpStampMethod = pMethodDesc->IsVersionableWithJumpStamp();
 
     NativeCodeVersion activeVersion;
     {
@@ -2167,6 +2234,8 @@ PCODE CodeVersionManager::PublishVersionableCodeIfNecessary(MethodDesc* pMethodD
         {
             pCode = pMethodDesc->PrepareCode(activeVersion);
         }
+
+        MethodDescBackpatchInfoTracker::ConditionalLockHolder lockHolder(pMethodDesc->MayHaveEntryPointSlotsToBackpatch());
 
         // suspend in preparation for publishing if needed
         if (fEESuspend)
@@ -2249,37 +2318,26 @@ HRESULT CodeVersionManager::PublishNativeCodeVersion(MethodDesc* pMethod, Native
 {
     // TODO: This function needs to make sure it does not change the precode's target if call counting is in progress. Track
     // whether call counting is currently being done for the method, and use a lock to ensure the expected precode target.
-    LIMITED_METHOD_CONTRACT;
+    WRAPPER_NO_CONTRACT;
     _ASSERTE(LockOwnedByCurrentThread());
     _ASSERTE(pMethod->IsVersionable());
     HRESULT hr = S_OK;
     PCODE pCode = nativeCodeVersion.IsNull() ? NULL : nativeCodeVersion.GetNativeCode();
-    if (pMethod->IsVersionableWithPrecode())
+    if (pMethod->IsVersionableWithoutJumpStamp())
     {
-        Precode* pPrecode = pMethod->GetOrCreatePrecode();
-        if (pCode == NULL)
+        EX_TRY
         {
-            EX_TRY
+            if (pCode == NULL)
             {
-                pPrecode->Reset();
+                pMethod->ResetCodeEntryPoint();
             }
-            EX_CATCH_HRESULT(hr);
-            return hr;
-        }
-        else
-        {
-            EX_TRY
+            else
             {
-                pPrecode->SetTargetInterlocked(pCode, FALSE);
-
-                // SetTargetInterlocked() would return false if it lost the race with another thread. That is fine, this thread
-                // can continue assuming it was successful, similarly to it successfully updating the target and another thread
-                // updating the target again shortly afterwards.
-                hr = S_OK;
+                pMethod->SetCodeEntryPoint(pCode);
             }
-            EX_CATCH_HRESULT(hr);
-            return hr;
         }
+        EX_CATCH_HRESULT(hr);
+        return hr;
     }
     else
     {
@@ -2389,10 +2447,6 @@ HRESULT CodeVersionManager::EnumerateClosedMethodDescs(
         while (appDomainIterator.Next())
         {
             AppDomain * pAppDomain = appDomainIterator.GetDomain();
-            if (pAppDomain->IsUnloading())
-            {
-                continue;
-            }
             hr = EnumerateDomainClosedMethodDescs(
                 pAppDomain,
                 pModule,
@@ -2447,19 +2501,12 @@ HRESULT CodeVersionManager::EnumerateDomainClosedMethodDescs(
     }
 #endif //_DEBUG
 
-    // If pAppDomainToSearch is NULL, iterate through all existing 
-    // instantiations loaded into the SharedDomain. If pAppDomainToSearch is non-NULL, 
-    // iterate through all existing instantiations in pAppDomainToSearch, and only consider
-    // instantiations in non-domain-neutral assemblies (as we already covered domain 
-    // neutral assemblies when we searched the SharedDomain).
-    LoadedMethodDescIterator::AssemblyIterationMode mode = LoadedMethodDescIterator::kModeSharedDomainAssemblies;
     // these are the default flags which won't actually be used in shared mode other than
     // asserting they were specified with their default values
     AssemblyIterationFlags assemFlags = (AssemblyIterationFlags)(kIncludeLoaded | kIncludeExecution);
     ModuleIterationOption moduleFlags = (ModuleIterationOption)kModIterIncludeLoaded;
     if (pAppDomainToSearch != NULL)
     {
-        mode = LoadedMethodDescIterator::kModeUnsharedADAssemblies;
         assemFlags = (AssemblyIterationFlags)(kIncludeAvailableToProfilers | kIncludeExecution);
         moduleFlags = (ModuleIterationOption)kModIterIncludeAvailableToProfilers;
     }
@@ -2467,7 +2514,6 @@ HRESULT CodeVersionManager::EnumerateDomainClosedMethodDescs(
         pAppDomainToSearch,
         pModuleContainingMethodDef,
         methodDef,
-        mode,
         assemFlags,
         moduleFlags);
     CollectibleAssemblyHolder<DomainAssembly *> pDomainAssembly;
@@ -2557,13 +2603,13 @@ HRESULT CodeVersionManager::DoJumpStampIfNecessary(MethodDesc* pMD, PCODE pCode)
         return S_OK;
     }
 
-    if (!(pMD->IsVersionable() && pMD->IsVersionableWithJumpStamp()))
+    if (!pMD->IsVersionableWithJumpStamp())
     {
         return GetNonVersionableError(pMD);
     }
 
 #ifndef FEATURE_JUMPSTAMP
-    _ASSERTE(!"How did we get here? IsVersionableWithJumpStamp() should have been FALSE above");
+    _ASSERTE(!"How did we get here? IsVersionableWithJumpStamp() should have been false above");
     return S_OK;
 #else
     HRESULT hr;
@@ -2591,9 +2637,30 @@ void CodeVersionManager::OnAppDomainExit(AppDomain * pAppDomain)
     LIMITED_METHOD_CONTRACT;
     // This would clean up all the allocations we have done and synchronize with any threads that might
     // still be using the data
-    _ASSERTE(!".Net Core shouldn't be doing app domain shutdown - if we start doing so this needs to be implemented");
+    _ASSERTE(!".NET Core shouldn't be doing app domain shutdown - if we start doing so this needs to be implemented");
 }
 #endif
+
+// Returns true if CodeVersionManager is capable of versioning this method. There may be other reasons that the runtime elects
+// not to version a method even if CodeVersionManager could support it. Use the MethodDesc::IsVersionableWith*() accessors to
+// get the final determination of versioning support for a given method.
+//
+//static
+bool CodeVersionManager::IsMethodSupported(PTR_MethodDesc pMethodDesc)
+{
+    WRAPPER_NO_CONTRACT;
+    _ASSERTE(pMethodDesc != NULL);
+
+    return
+        // CodeVersionManager data structures don't properly handle the lifetime semantics of dynamic code at this point
+        !pMethodDesc->IsDynamicMethod() &&
+
+        // CodeVersionManager data structures don't properly handle the lifetime semantics of collectible code at this point
+        !pMethodDesc->GetLoaderAllocator()->IsCollectible() &&
+
+        // EnC has its own way of versioning
+        !pMethodDesc->IsEnCMethod();
+}
 
 //---------------------------------------------------------------------------------------
 //
@@ -2855,7 +2922,7 @@ PublishMethodTableHolder::PublishMethodTableHolder(MethodTable* pMethodTable) :
         // We need to be careful to only query portions of the MethodDesc
         // that work in a partially restored state. The only methods that need
         // further restoration are IL stubs (which aren't rejittable) and
-        // generic methods. The only generic methods directly accesible from
+        // generic methods. The only generic methods directly accessible from
         // the MethodTable are definitions. GetNativeCode() on generic defs
         // will run succesfully and return NULL which short circuits the
         // rest of the logic.

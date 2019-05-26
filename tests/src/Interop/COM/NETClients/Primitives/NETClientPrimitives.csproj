@@ -11,8 +11,13 @@
     <ProjectTypeGuids>{209912F9-0DA1-4184-9CC1-8D583BAF4A28};{87799F5D-CEBD-499D-BDBA-B2C6105CD766}</ProjectTypeGuids>
     <ApplicationManifest>App.manifest</ApplicationManifest>
 
+    <!-- Blocked on ILAsm supporting embedding resources. See https://github.com/dotnet/coreclr/issues/20819 -->
+    <IlrtTestKind>BuildOnly</IlrtTestKind>
+
     <!-- Test unsupported outside of windows -->
     <TestUnsupportedOutsideWindows>true</TestUnsupportedOutsideWindows>
+    <!-- This test would require the runincontext.exe to include App.manifest describing the COM interfaces -->
+    <UnloadabilityIncompatible>true</UnloadabilityIncompatible>
     <DisableProjectBuild Condition="'$(TargetsUnix)' == 'true'">true</DisableProjectBuild>
   </PropertyGroup>
   <!-- Default configurations to help VS understand the configurations -->
@@ -26,13 +31,17 @@
     <Compile Include="ErrorTests.cs" />
     <Compile Include="NumericTests.cs" />
     <Compile Include="StringTests.cs" />
-    <Compile Include="../../ServerContracts/Primitives.cs" />
-    <Compile Include="../../ServerContracts/PrimitivesNativeServer.cs" />
+    <Compile Include="ColorTests.cs" />
+    <Compile Include="../../ServerContracts/Server.CoClasses.cs" />
+    <Compile Include="../../ServerContracts/Server.Contracts.cs" />
     <Compile Include="../../ServerContracts/ServerGuids.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../NativeServer/CMakeLists.txt" />
     <ProjectReference Include="../../../../Common/CoreCLRTestLibrary/CoreCLRTestLibrary.csproj" />
+    <PackageReference Include="System.Drawing.Common">
+      <Version>$(MicrosoftPrivateCoreFxNETCoreAppVersion)</Version>
+    </PackageReference>
   </ItemGroup>
   <Import Project="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildThisFileDirectory), dir.targets))\dir.targets" />
 </Project>

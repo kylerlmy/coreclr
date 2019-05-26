@@ -222,6 +222,7 @@ public:
 
 #ifdef FEATURE_READYTORUN_COMPILER
     ZapVirtualSection * m_pAvailableTypesSection;
+    ZapVirtualSection * m_pAttributePresenceSection;
 #endif
 
     // Preloader sections
@@ -478,7 +479,7 @@ private:
         static BOOL Equals(key_t k1, key_t k2);
         static COUNT_T Hash(key_t k);
 
-        static const element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
+        static element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
         static bool IsNull(const element_t &e) { LIMITED_METHOD_CONTRACT; return e == NULL; }
     };
 
@@ -596,9 +597,12 @@ private:
     void OutputTypesTableForReadyToRun(IMDInternalImport * pMDImport);
     void OutputInliningTableForReadyToRun();
     void OutputProfileDataForReadyToRun();
+    void OutputManifestMetadataForReadyToRun();
+    HRESULT ComputeAttributePresenceTable(IMDInternalImport * pMDImport, SArray<UINT16> *table);
+    void OutputAttributePresenceFilter(IMDInternalImport * pMDImport);
 
     void CopyDebugDirEntry();
-    void CopyWin32VersionResource();
+    void CopyWin32Resources();
 
     void OutputManifestMetadata();
     void OutputTables();
@@ -691,6 +695,7 @@ public:
     }
 
     static void __stdcall TryCompileMethodStub(LPVOID pContext, CORINFO_METHOD_HANDLE hStub, CORJIT_FLAGS jitFlags);
+    static DWORD EncodeModuleHelper(LPVOID compileContext, CORINFO_MODULE_HANDLE referencedModule);
 
     BOOL IsVTableGapMethod(mdMethodDef md);
 
@@ -838,14 +843,15 @@ public:
     }
 
     HRESULT LocateProfileData();
-    HRESULT parseProfileData  ();
+    HRESULT parseProfileData();
     HRESULT convertProfileDataFromV1();
+    HRESULT hashMethodBlockCounts();
+    void hashBBUpdateFlagsAndCompileResult(mdToken token, unsigned methodProfilingDataFlags, CompileStatus compileResult);
+
     void RehydrateBasicBlockSection();
     void RehydrateTokenSection(int sectionFormat, unsigned int flagTable[255]);
     void RehydrateBlobStream();
     HRESULT RehydrateProfileData();
-    HRESULT hashBBProfileData ();
-    void hashBBUpdateFlagsAndCompileResult(mdToken token, unsigned methodProfilingDataFlags, CompileStatus compileResult);
 
     void              LoadProfileData();
     CorProfileData *  NewProfileData();

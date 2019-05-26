@@ -106,7 +106,12 @@ if(WIN32)
   )
 else(WIN32)
   add_definitions(-DPAL_STDCPP_COMPAT=1)
-  add_compile_options(-Wno-null-arithmetic)
+  if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    add_compile_options(-Wno-null-arithmetic)
+  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-conversion-null")
+    add_compile_options(-Wno-pointer-arith)
+  endif()
   add_compile_options(-Wno-format)
 
   include_directories(BEFORE xplat)
@@ -127,7 +132,6 @@ else(WIN32)
     strike.cpp
     sos.cpp
     util.cpp
-    ../../../coreclr/hosts/unixcoreruncommon/coreruncommon.cpp
   )
 
   set(SOS_LIBRARY
@@ -137,6 +141,7 @@ else(WIN32)
     # share the PAL in the dac module
     mscordaccore
     palrt
+    unixcoreruncommon
   )
 
   set(DEF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/sos_unixexports.src)

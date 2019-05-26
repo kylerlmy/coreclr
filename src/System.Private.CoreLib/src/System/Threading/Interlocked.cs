@@ -8,19 +8,18 @@ using System.Runtime.InteropServices;
 
 namespace System.Threading
 {
-    // After much discussion, we decided the Interlocked class doesn't need 
-    // any HPA's for synchronization or external threading.  They hurt C#'s 
-    // codegen for the yield keyword, and arguably they didn't protect much.  
-    // Instead, they penalized people (and compilers) for writing threadsafe 
-    // code.
+    /// <summary>
+    /// After much discussion, we decided the Interlocked class doesn't need 
+    /// any HPA's for synchronization or external threading.  They hurt C#'s 
+    /// codegen for the yield keyword, and arguably they didn't protect much.  
+    /// Instead, they penalized people (and compilers) for writing threadsafe 
+    /// code.
+    /// </summary>
     public static class Interlocked
     {
-        /******************************
-         * Increment
-         *   Implemented: int
-         *                        long
-         *****************************/
-
+        /// <summary>
+        /// Implemented: int, long
+        /// </summary>
         public static int Increment(ref int location)
         {
             return Add(ref location, 1);
@@ -31,12 +30,9 @@ namespace System.Threading
             return Add(ref location, 1);
         }
 
-        /******************************
-         * Decrement
-         *   Implemented: int
-         *                        long
-         *****************************/
-
+        /// <summary>
+        /// Implemented: int, long
+        /// </summary>
         public static int Decrement(ref int location)
         {
             return Add(ref location, -1);
@@ -47,16 +43,9 @@ namespace System.Threading
             return Add(ref location, -1);
         }
 
-        /******************************
-         * Exchange
-         *   Implemented: int
-         *                        long
-         *                        float
-         *                        double
-         *                        Object
-         *                        IntPtr
-         *****************************/
-
+        /// <summary>
+        /// Implemented: int, long, float, double, Object, IntPtr
+        /// </summary>
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         public static extern int Exchange(ref int location1, int value);
 
@@ -70,7 +59,7 @@ namespace System.Threading
         public static extern double Exchange(ref double location1, double value);
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
-        public static extern object Exchange(ref object location1, object value);
+        public static extern object? Exchange(ref object? location1, object? value);
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         public static extern IntPtr Exchange(ref IntPtr location1, IntPtr value);
@@ -78,21 +67,14 @@ namespace System.Threading
         // This whole method reduces to a single call to Exchange(ref object, object) but
         // the JIT thinks that it will generate more native code than it actually does.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static T Exchange<T>(ref T location1, T value) where T : class
+        public static T Exchange<T>(ref T location1, T value) where T : class?
         {
-            return Unsafe.As<T>(Exchange(ref Unsafe.As<T, object>(ref location1), value));
+            return Unsafe.As<T>(Exchange(ref Unsafe.As<T, object?>(ref location1), value));
         }
 
-        /******************************
-         * CompareExchange
-         *    Implemented: int
-         *                         long
-         *                         float
-         *                         double
-         *                         Object
-         *                         IntPtr
-         *****************************/
-
+        /// <summary>
+        /// Implemented: int, long, float, double, Object, IntPtr
+        /// </summary>
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         public static extern int CompareExchange(ref int location1, int value, int comparand);
 
@@ -106,7 +88,7 @@ namespace System.Threading
         public static extern double CompareExchange(ref double location1, double value, double comparand);
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
-        public static extern object CompareExchange(ref object location1, object value, object comparand);
+        public static extern object? CompareExchange(ref object? location1, object? value, object? comparand);
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         public static extern IntPtr CompareExchange(ref IntPtr location1, IntPtr value, IntPtr comparand);
@@ -120,21 +102,18 @@ namespace System.Threading
         //     ret
         // The workaround is no longer strictly necessary now that we have Unsafe.As but it does
         // have the advantage of being less sensitive to JIT's inliner decisions.
-        public static T CompareExchange<T>(ref T location1, T value, T comparand) where T : class
+        public static T CompareExchange<T>(ref T location1, T value, T comparand) where T : class?
         {
-            return Unsafe.As<T>(CompareExchange(ref Unsafe.As<T, object>(ref location1), value, comparand));
+            return Unsafe.As<T>(CompareExchange(ref Unsafe.As<T, object?>(ref location1), value, comparand));
         }
 
         // BCL-internal overload that returns success via a ref bool param, useful for reliable spin locks.
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         internal static extern int CompareExchange(ref int location1, int value, int comparand, ref bool succeeded);
 
-        /******************************
-         * Add
-         *    Implemented: int
-         *                         long
-         *****************************/
-
+        /// <summary>
+        /// Implemented: int, long
+        /// </summary>
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         internal static extern int ExchangeAdd(ref int location1, int value);
 
@@ -151,9 +130,6 @@ namespace System.Threading
             return ExchangeAdd(ref location1, value) + value;
         }
 
-        /******************************
-         * Read
-         *****************************/
         public static long Read(ref long location)
         {
             return Interlocked.CompareExchange(ref location, 0, 0);

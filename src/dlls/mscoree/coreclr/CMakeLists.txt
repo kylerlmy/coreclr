@@ -15,6 +15,9 @@ if (WIN32)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DELAYLOAD:api-ms-win-core-winrt-roparameterizediid-l1-1-0.dll")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DELAYLOAD:api-ms-win-ro-typeresolution-l1-1-0.dll")
 
+    # Delay load version.dll so that we can specify how to search when loading it as it is not part of Windows' known DLLs
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DELAYLOAD:version.dll")
+
     # No library groups for Win32
     set(START_LIBRARY_GROUP)
     set(END_LIBRARY_GROUP)
@@ -105,7 +108,6 @@ if(WIN32)
         ${STATIC_MT_CRT_LIB}
         ${STATIC_MT_VCRT_LIB}
         mdwinmd_wks
-        comnls_wks
         kernel32.lib
         advapi32.lib
         ole32.lib
@@ -126,6 +128,14 @@ else()
         palrt
     )
 endif(WIN32)
+
+if(CMAKE_SYSTEM_NAME STREQUAL Linux)
+    list(APPEND CORECLR_LIBRARIES
+        ${START_WHOLE_ARCHIVE}
+        tracepointprovider
+        ${END_WHOLE_ARCHIVE}
+    )
+endif(CMAKE_SYSTEM_NAME STREQUAL Linux)
 
 if(FEATURE_PERFTRACING)
     list(APPEND CORECLR_LIBRARIES
@@ -163,21 +173,23 @@ if(WIN32)
     endif()
 
     set(DACTABLEGEN_EXE ${CMAKE_BINARY_DIR}/src/ToolBox/SOS/DacTableGen/dactablegen.exe)
-    # The DactTableGen executable that we build needs an msdia140.dll supplied by Visual Studio.
-    # however VS2015 may not have this, so fall back to the DactTableGen in the tools package (which is old)
-    if($ENV{__VSVersion} STREQUAL "vs2015")
-        set(DACTABLEGEN_EXE ${BuildToolsDir}/dactablegen.exe)
+
+    if (CLR_CMAKE_CROSS_ARCH)
+      include(${CMAKE_INSTALL_PREFIX}/${CLR_CMAKE_CROSS_HOST_ARCH}/dactabletools/dactabletools.cmake)
     endif()
+
+    set(INJECT_RESOURCE_EXE $<TARGET_FILE:InjectResource>)
+    set(GEN_CLR_DEBUG_RESOURCE_EXE $<TARGET_FILE:GenClrDebugResource>)
 
     add_custom_command(
         DEPENDS coreclr mscordaccore mscordbi ${CLR_DIR}/src/debug/daccess/daccess.cpp
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/inject_debug_resources.timestamp
         COMMAND ${CMAKE_CXX_COMPILER} /P /EP /TP ${PREPROCESS_DEFINITIONS} ${INC_DIR} /Fi${CMAKE_CURRENT_BINARY_DIR}/daccess.i  ${CLR_DIR}/src/debug/daccess/daccess.cpp
         COMMAND ${DACTABLEGEN_EXE} /dac:${CMAKE_CURRENT_BINARY_DIR}/daccess.i /pdb:${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/coreclr.pdb /dll:$<TARGET_FILE:coreclr> /bin:${CMAKE_CURRENT_BINARY_DIR}/wks.bin
-        COMMAND ${BuildToolsDir}/InjectResource.exe /bin:${CMAKE_CURRENT_BINARY_DIR}/wks.bin /dll:$<TARGET_FILE:coreclr>
-        COMMAND ${BuildToolsDir}/GenClrDebugResource.exe /dac:$<TARGET_FILE:mscordaccore> /dbi:$<TARGET_FILE:mscordbi> /sku:onecoreclr /out:${CMAKE_CURRENT_BINARY_DIR}/clrDebugResource.bin
-        COMMAND ${BuildToolsDir}/InjectResource.exe /bin:${CMAKE_CURRENT_BINARY_DIR}/clrDebugResource.bin /dll:$<TARGET_FILE:coreclr> /name:CLRDEBUGINFO
-        COMMAND ${BuildToolsDir}/InjectResource.exe /bin:${CMAKE_CURRENT_SOURCE_DIR}/dump_helper_resource.bin /dll:$<TARGET_FILE:coreclr> /name:MINIDUMP_AUXILIARY_PROVIDER
+        COMMAND ${INJECT_RESOURCE_EXE} /bin:${CMAKE_CURRENT_BINARY_DIR}/wks.bin /dll:$<TARGET_FILE:coreclr>
+        COMMAND ${GEN_CLR_DEBUG_RESOURCE_EXE} /dac:$<TARGET_FILE:mscordaccore> /dbi:$<TARGET_FILE:mscordbi> /sku:onecoreclr /out:${CMAKE_CURRENT_BINARY_DIR}/clrDebugResource.bin
+        COMMAND ${INJECT_RESOURCE_EXE} /bin:${CMAKE_CURRENT_BINARY_DIR}/clrDebugResource.bin /dll:$<TARGET_FILE:coreclr> /name:CLRDEBUGINFO
+        COMMAND ${INJECT_RESOURCE_EXE} /bin:${CMAKE_CURRENT_SOURCE_DIR}/dump_helper_resource.bin /dll:$<TARGET_FILE:coreclr> /name:MINIDUMP_AUXILIARY_PROVIDER
         COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/inject_debug_resources.timestamp
         COMMENT Add dactable, debug resources, and dump helper resources to coreclr
     )

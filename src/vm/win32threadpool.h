@@ -221,7 +221,6 @@ public:
     };
 
     typedef struct {
-        ADID AppDomainId;
         INT32 TimerId;
     } TimerInfoContext;
 
@@ -244,6 +243,8 @@ public:
  
     static BOOL GetAvailableThreads(DWORD* AvailableWorkerThreads, 
                                  DWORD* AvailableIOCompletionThreads);
+
+    static INT32 GetThreadCount();
 
     static BOOL QueueUserWorkItem(LPTHREAD_START_ROUTINE Function, 
                                   PVOID Context,
@@ -293,7 +294,7 @@ public:
     );
 
     static BOOL SetAppDomainRequestsActive(BOOL UnmanagedTP = FALSE);
-    static void ClearAppDomainRequestsActive(BOOL UnmanagedTP = FALSE, BOOL AdUnloading = FALSE, LONG index = -1);
+    static void ClearAppDomainRequestsActive(BOOL UnmanagedTP = FALSE,  LONG index = -1);
 
     static inline void UpdateLastDequeueTime()
     {
@@ -321,7 +322,7 @@ public:
     static BOOL HaveTimerInfosToFlush() { return TimerInfosToBeRecycled != NULL; }
 
 #ifndef FEATURE_PAL    
-    static LPOVERLAPPED CompletionPortDispatchWorkWithinAppDomain(Thread* pThread, DWORD* pErrorCode, DWORD* pNumBytes, size_t* pKey, DWORD adid);
+    static LPOVERLAPPED CompletionPortDispatchWorkWithinAppDomain(Thread* pThread, DWORD* pErrorCode, DWORD* pNumBytes, size_t* pKey);
     static void StoreOverlappedInfoInThread(Thread* pThread, DWORD dwErrorCode, DWORD dwNumBytes, size_t key, LPOVERLAPPED lpOverlapped);
 #endif // !FEATURE_PAL
 
@@ -425,7 +426,6 @@ private:
         CLREvent            InternalCompletionEvent; // only one of InternalCompletion or ExternalCompletion is used
                                                      // but I cant make a union since CLREvent has a non-default constructor
         HANDLE              ExternalCompletionEvent; // they are signalled when all callbacks have completed (refCount=0)
-        ADID                handleOwningAD;
         OBJECTHANDLE        ExternalEventSafeHandle;
 
     } ;
@@ -476,10 +476,7 @@ private:
 
                 {
                     GCX_COOP();
-                    AppDomainFromIDHolder ad(pDelegate->m_appDomainId, TRUE);
-                    if (!ad.IsUnloaded())
-                        // if no domain then handle already gone or about to go.
-                        StoreObjectInHandle(pDelegate->m_registeredWaitHandle, NULL);
+                    StoreObjectInHandle(pDelegate->m_registeredWaitHandle, NULL);
                 }
             }
 
@@ -496,7 +493,6 @@ private:
     }
 
     static VOID ReleaseInfo(OBJECTHANDLE& hndSafeHandle, 
-        ADID& owningAD, 
         HANDLE hndNativeHandle)
     {
         CONTRACTL
@@ -522,26 +518,22 @@ private:
             {
                 EX_TRY
                 {
-                    ENTER_DOMAIN_ID(owningAD);
+                    // Read the GC handle
+                    refSH = (SAFEHANDLEREF) ObjectToOBJECTREF(ObjectFromHandle(hndSafeHandle));
+
+                    // Destroy the GC handle
+                    DestroyHandle(hndSafeHandle);
+
+                    if (refSH != NULL)
                     {
-                        // Read the GC handle
-                        refSH = (SAFEHANDLEREF) ObjectToOBJECTREF(ObjectFromHandle(hndSafeHandle));
+                        SafeHandleHolder h(&refSH);
 
-                        // Destroy the GC handle
-                        DestroyHandle(hndSafeHandle);
-
-                        if (refSH != NULL)
+                        HANDLE hEvent = refSH->GetHandle();
+                        if (hEvent != INVALID_HANDLE_VALUE)
                         {
-                            SafeHandleHolder h(&refSH);
-                            
-                            HANDLE hEvent = refSH->GetHandle();
-                            if (hEvent != INVALID_HANDLE_VALUE)
-                            {
-                                UnsafeSetEvent(hEvent);
-                            }
+                            SetEvent(hEvent);
                         }
                     }
-                    END_DOMAIN_TRANSITION;
                 }
                 EX_CATCH
                 {
@@ -552,7 +544,6 @@ private:
             GCPROTECT_END();
             
             hndSafeHandle = NULL;
-            owningAD = (ADID) 0;
         }
 #endif
     }
@@ -577,7 +568,6 @@ private:
         HANDLE ExternalCompletionEvent;     // only one of this is used, but cant do a union since CLREvent has a non-default constructor
         CLREvent InternalCompletionEvent;   // flags indicates which one is being used
         OBJECTHANDLE    ExternalEventSafeHandle;
-        ADID    handleOwningAD;
     } TimerInfo;
 
     static VOID AcquireWaitInfo(WaitInfo *pInfo)
@@ -588,7 +578,6 @@ private:
         WRAPPER_NO_CONTRACT;
 #ifndef DACCESS_COMPILE
         ReleaseInfo(pInfo->ExternalEventSafeHandle, 
-        pInfo->handleOwningAD, 
         pInfo->ExternalCompletionEvent);
 #endif
     }
@@ -600,7 +589,6 @@ private:
         WRAPPER_NO_CONTRACT;
 #ifndef DACCESS_COMPILE
         ReleaseInfo(pInfo->ExternalEventSafeHandle, 
-        pInfo->handleOwningAD, 
         pInfo->ExternalCompletionEvent);
 #endif
     }
@@ -700,7 +688,7 @@ public:
 
 	        while(lock != 0 || FastInterlockExchange( &lock, 1 ) != 0)
 	        {
-                YieldProcessor();           // indicate to the processor that we are spinning
+                YieldProcessorNormalized(); // indicate to the processor that we are spinning
 
 	            rounds++;
 	            
@@ -749,12 +737,22 @@ public:
         {
             LIMITED_METHOD_CONTRACT;
 
+            DWORD processorNumber = 0;
+
+#ifndef FEATURE_PAL
 	        if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
-                return pRecycledListPerProcessor[CPUGroupInfo::CalculateCurrentProcessorNumber()][memType];
+                processorNumber = CPUGroupInfo::CalculateCurrentProcessorNumber();
             else
                 // Turns out GetCurrentProcessorNumber can return a value greater than the number of processors reported by
                 // GetSystemInfo, if we're running in WOW64 on a machine with >32 processors.
-        	    return pRecycledListPerProcessor[GetCurrentProcessorNumber()%NumberOfProcessors][memType];
+        	    processorNumber = GetCurrentProcessorNumber()%NumberOfProcessors;
+#else // !FEATURE_PAL
+            if (PAL_HasGetCurrentProcessorNumber())
+            {
+                processorNumber = GetCurrentProcessorNumber();
+            }
+#endif // !FEATURE_PAL
+            return pRecycledListPerProcessor[processorNumber][memType];
     	}
     };
 
@@ -845,7 +843,7 @@ public:
     static void NotifyWorkItemCompleted()
     {
         WRAPPER_NO_CONTRACT;
-        Thread::IncrementThreadPoolCompletionCount();
+        Thread::IncrementWorkerThreadPoolCompletionCount(GetThread());
         UpdateLastDequeueTime();
     }
 

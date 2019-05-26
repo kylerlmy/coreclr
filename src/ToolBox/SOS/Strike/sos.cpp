@@ -562,6 +562,7 @@ namespace sos
                 // There are no object references, but there is still a reference for 
                 // collectible types - the LoaderAllocator for GC
                 mCurr = mLoaderAllocatorObjectHandle;
+                mDone = false;
             }
         }
     }
@@ -792,6 +793,11 @@ namespace sos
             if (FAILED(mHeaps[0].Request(g_sos)))
                 sos::Throw<DataRead>("Failed to request GC details data.");
         }
+    }
+
+    GCHeap::~GCHeap()
+    {
+        delete [] mHeaps;
     }
 
     ObjectIterator GCHeap::WalkHeap(TADDR start, TADDR stop) const

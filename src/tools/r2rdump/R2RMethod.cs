@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.IO;
 using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
@@ -136,21 +137,25 @@ namespace R2RDump
             EHInfo = ehInfo;
         }
 
-        public override string ToString()
+        public void WriteTo(TextWriter writer, DumpOptions options)
         {
-            StringBuilder sb = new StringBuilder();
-
-            sb.AppendLine($"Id: {Id}");
-            sb.AppendLine($"StartAddress: 0x{StartAddress:X8}");
+            if (!options.Naked)
+            {
+                writer.WriteLine($"Id: {Id}");
+                writer.WriteLine($"StartAddress: 0x{StartAddress:X8}");
+            }
             if (Size == -1)
             {
-                sb.AppendLine("Size: Unavailable");
+                writer.WriteLine("Size: Unavailable");
             }
             else
             {
-                sb.AppendLine($"Size: {Size} bytes");
+                writer.WriteLine($"Size: {Size} bytes");
             }
-            sb.AppendLine($"UnwindRVA: 0x{UnwindRVA:X8}");
+            if (!options.Naked)
+            {
+                writer.WriteLine($"UnwindRVA: 0x{UnwindRVA:X8}");
+            }
             if (UnwindInfo is Amd64.UnwindInfo amd64UnwindInfo)
             {
                 string parsedFlags = "";
@@ -170,40 +175,84 @@ namespace R2RDump
                 {
                     parsedFlags = " NHANDLER";
                 }
-                sb.AppendLine($"Version:            {amd64UnwindInfo.Version}");
-                sb.AppendLine($"Flags:              0x{amd64UnwindInfo.Flags:X2}{parsedFlags}");
-                sb.AppendLine($"SizeOfProlog:       0x{amd64UnwindInfo.SizeOfProlog:X4}");
-                sb.AppendLine($"CountOfUnwindCodes: {amd64UnwindInfo.CountOfUnwindCodes}");
-                sb.AppendLine($"FrameRegister:      {amd64UnwindInfo.FrameRegister}");
-                sb.AppendLine($"FrameOffset:        0x{amd64UnwindInfo.FrameOffset}");
-                sb.AppendLine($"PersonalityRVA:     0x{amd64UnwindInfo.PersonalityRoutineRVA:X4}");
+                writer.WriteLine($"Version:            {amd64UnwindInfo.Version}");
+                writer.WriteLine($"Flags:              0x{amd64UnwindInfo.Flags:X2}{parsedFlags}");
+                writer.WriteLine($"SizeOfProlog:       0x{amd64UnwindInfo.SizeOfProlog:X4}");
+                writer.WriteLine($"CountOfUnwindCodes: {amd64UnwindInfo.CountOfUnwindCodes}");
+                writer.WriteLine($"FrameRegister:      {amd64UnwindInfo.FrameRegister}");
+                writer.WriteLine($"FrameOffset:        0x{amd64UnwindInfo.FrameOffset}");
+                if (!options.Naked)
+                {
+                    writer.WriteLine($"PersonalityRVA:     0x{amd64UnwindInfo.PersonalityRoutineRVA:X4}");
+                }
 
                 for (int unwindCodeIndex = 0; unwindCodeIndex < amd64UnwindInfo.CountOfUnwindCodes; unwindCodeIndex++)
                 {
                     Amd64.UnwindCode unwindCode = amd64UnwindInfo.UnwindCodeArray[unwindCodeIndex];
-                    sb.Append($"UnwindCode[{unwindCode.Index}]: ");
-                    sb.Append($"CodeOffset 0x{unwindCode.CodeOffset:X4} ");
-                    sb.Append($"FrameOffset 0x{unwindCode.FrameOffset:X4} ");
-                    sb.Append($"NextOffset 0x{unwindCode.NextFrameOffset} ");
-                    sb.Append($"Op {unwindCode.OpInfoStr}");
-                    sb.AppendLine();
+                    writer.Write($"UnwindCode[{unwindCode.Index}]: ");
+                    writer.Write($"CodeOffset 0x{unwindCode.CodeOffset:X4} ");
+                    writer.Write($"FrameOffset 0x{unwindCode.FrameOffset:X4} ");
+                    writer.Write($"NextOffset 0x{unwindCode.NextFrameOffset} ");
+                    writer.Write($"Op {unwindCode.OpInfoStr}");
+                    writer.WriteLine();
                 }
             }
-            sb.AppendLine();
+            writer.WriteLine();
+
+            if (Method.GcInfo is Amd64.GcInfo gcInfo)
+            {
+                writer.WriteLine("GC info:");
+                writer.WriteLine($@"    Version:                           {gcInfo.Version}");
+                writer.WriteLine($@"    ReturnKind:                        {gcInfo.ReturnKind}");
+                writer.WriteLine($@"    ValidRangeStart:                   0x{gcInfo.ValidRangeStart:X4}");
+                writer.WriteLine($@"    ValidRangeEnd:                     0x{gcInfo.ValidRangeEnd:X4}");
+                writer.WriteLine($@"    SecurityObjectStackSlot:           0x{gcInfo.SecurityObjectStackSlot:X4}");
+                writer.WriteLine($@"    GSCookieStackSlot:                 0x{gcInfo.GSCookieStackSlot:X4}");
+                writer.WriteLine($@"    PSPSymStackSlot:                   0x{gcInfo.PSPSymStackSlot:X4}");
+                writer.WriteLine($@"    GenericsInstContextStackSlot:      0x{gcInfo.GenericsInstContextStackSlot:X4}");
+                writer.WriteLine($@"    StackBaseRegister:                 {gcInfo.StackBaseRegister}");
+                writer.WriteLine($@"    SizeOfENCPreservedArea:            0x{gcInfo.SizeOfEditAndContinuePreservedArea:X4}");
+                writer.WriteLine($@"    ReversePInvokeFrameStackSlot:      0x{gcInfo.ReversePInvokeFrameStackSlot:X4}");
+                writer.WriteLine($@"    SizeOfStackOutgoingAndScratchArea: 0x{gcInfo.SizeOfStackOutgoingAndScratchArea:X4}");
+                writer.WriteLine($@"    NumSafePoints:                     {gcInfo.NumSafePoints}");
+                writer.WriteLine($@"    NumInterruptibleRanges:            {gcInfo.NumInterruptibleRanges}");
+
+                writer.WriteLine($@"    SafePointOffsets: {gcInfo.SafePointOffsets.Count}");
+                foreach (Amd64.GcInfo.SafePointOffset safePoint in gcInfo.SafePointOffsets)
+                {
+                    writer.WriteLine($@"        Index: {safePoint.Index,2}; Value: 0x{safePoint.Value:X4}");
+                }
+
+                writer.WriteLine($@"    InterruptibleRanges: {gcInfo.InterruptibleRanges.Count}");
+                foreach (Amd64.InterruptibleRange range in gcInfo.InterruptibleRanges)
+                {
+                    writer.WriteLine($@"        Index: {range.Index,2}; StartOffset: 0x{range.StartOffset:X4}; StopOffset: 0x{range.StopOffset:X4}");
+                }
+
+                writer.WriteLine("    SlotTable:");
+                writer.WriteLine($@"        NumRegisters:  {gcInfo.SlotTable.NumRegisters}");
+                writer.WriteLine($@"        NumStackSlots: {gcInfo.SlotTable.NumStackSlots}");
+                writer.WriteLine($@"        NumUntracked:  {gcInfo.SlotTable.NumUntracked}");
+                writer.WriteLine($@"        NumSlots:      {gcInfo.SlotTable.NumSlots}");
+                writer.WriteLine($@"        GcSlots:       {gcInfo.SlotTable.GcSlots.Count}");
+                foreach (Amd64.GcSlotTable.GcSlot slot in gcInfo.SlotTable.GcSlots)
+                {
+                    writer.WriteLine($@"            Index: {slot.Index,2}; RegisterNumber: {slot.RegisterNumber,2}; Flags: {slot.Flags}");
+                }
+                writer.WriteLine();
+            }
 
             if (EHInfo != null)
             {
-                sb.AppendLine($@"EH info @ {EHInfo.EHInfoRVA:X4}, #clauses = {EHInfo.EHClauses.Length}");
-                EHInfo.WriteTo(sb);
-                sb.AppendLine();
+                writer.WriteLine($@"EH info @ {EHInfo.EHInfoRVA:X4}, #clauses = {EHInfo.EHClauses.Length}");
+                EHInfo.WriteTo(writer);
+                writer.WriteLine();
             }
 
             if (DebugInfo != null)
             {
-                sb.AppendLine(DebugInfo.ToString());
+                DebugInfo.WriteTo(writer, options);
             }
-
-            return sb.ToString();
         }
     }
 
@@ -211,8 +260,10 @@ namespace R2RDump
     {
         private const int _mdtMethodDef = 0x06000000;
 
-        MetadataReader _mdReader;
-        MethodDefinition _methodDef;
+        /// <summary>
+        /// R2R reader representing the method module.
+        /// </summary>
+        public R2RReader R2RReader { get; }
 
         /// <summary>
         /// An unique index for the method
@@ -230,8 +281,6 @@ namespace R2RDump
         /// </summary>
         public string SignatureString { get; set; }
 
-        public bool IsGeneric { get; set; }
-
         public MethodSignature<string> Signature { get; }
 
         /// <summary>
@@ -240,9 +289,9 @@ namespace R2RDump
         public string DeclaringType { get; set; }
 
         /// <summary>
-        /// The token of the method consisting of the table code (0x06) and row id
+        /// The method metadata handle
         /// </summary>
-        public uint Token { get; set; }
+        public EntityHandle MethodHandle { get; set; }
 
         /// <summary>
         /// The row id of the method
@@ -264,105 +313,96 @@ namespace R2RDump
 
         public FixupCell[] Fixups { get; set; }
 
-        /// <summary>
-        /// Maps all the generic parameters to the type in the instance
-        /// </summary>
-        private Dictionary<string, string> _genericParamInstanceMap;
-
         public R2RMethod() { }
 
         /// <summary>
         /// Extracts the method signature from the metadata by rid
         /// </summary>
-        public R2RMethod(int index, MetadataReader mdReader, uint rid, int entryPointId, CorElementType[] instanceArgs, uint[] tok, FixupCell[] fixups)
+        public R2RMethod(
+            int index, 
+            R2RReader r2rReader, 
+            EntityHandle methodHandle, 
+            int entryPointId, 
+            string owningType, 
+            string constrainedType, 
+            string[] instanceArgs,
+            FixupCell[] fixups)
         {
             Index = index;
-            Token = _mdtMethodDef | rid;
-            Rid = rid;
+            MethodHandle = methodHandle;
             EntryPointRuntimeFunctionId = entryPointId;
 
-            _mdReader = mdReader;
+            R2RReader = r2rReader;
             RuntimeFunctions = new List<RuntimeFunction>();
 
-            // get the method signature from the MethodDefhandle
-            MethodDefinitionHandle methodDefHandle = MetadataTokens.MethodDefinitionHandle((int)rid);
-            _methodDef = mdReader.GetMethodDefinition(methodDefHandle);
-            Name = mdReader.GetString(_methodDef.Name);
-            BlobReader signatureReader = mdReader.GetBlobReader(_methodDef.Signature);
+            EntityHandle owningTypeHandle;
+            GenericParameterHandleCollection genericParams = default(GenericParameterHandleCollection);
 
-            TypeDefinitionHandle declaringTypeHandle = _methodDef.GetDeclaringType();
-            DeclaringType = MetadataNameFormatter.FormatHandle(mdReader, declaringTypeHandle);
+            DisassemblingGenericContext genericContext = new DisassemblingGenericContext(typeParameters: Array.Empty<string>(), methodParameters: instanceArgs);
+            DisassemblingTypeProvider typeProvider = new DisassemblingTypeProvider();
 
-            SignatureHeader signatureHeader = signatureReader.ReadSignatureHeader();
-            IsGeneric = signatureHeader.IsGeneric;
-            GenericParameterHandleCollection genericParams = _methodDef.GetGenericParameters();
-            _genericParamInstanceMap = new Dictionary<string, string>();
-            
-            int argCount = signatureReader.ReadCompressedInteger();
-            if (IsGeneric)
+            // get the method signature from the method handle
+            switch (MethodHandle.Kind)
             {
-                argCount = signatureReader.ReadCompressedInteger();
+                case HandleKind.MethodDefinition:
+                    {
+                        MethodDefinition methodDef = R2RReader.MetadataReader.GetMethodDefinition((MethodDefinitionHandle)MethodHandle);
+                        Name = R2RReader.MetadataReader.GetString(methodDef.Name);
+                        Signature = methodDef.DecodeSignature<string, DisassemblingGenericContext>(typeProvider, genericContext);
+                        owningTypeHandle = methodDef.GetDeclaringType();
+                        genericParams = methodDef.GetGenericParameters();
+                    }
+                    break;
+
+                case HandleKind.MemberReference:
+                    {
+                        MemberReference memberRef = R2RReader.MetadataReader.GetMemberReference((MemberReferenceHandle)MethodHandle);
+                        Name = R2RReader.MetadataReader.GetString(memberRef.Name);
+                        Signature = memberRef.DecodeMethodSignature<string, DisassemblingGenericContext>(typeProvider, genericContext);
+                        owningTypeHandle = memberRef.Parent;
+                    }
+                    break;
+
+                default:
+                    throw new NotImplementedException();
+            }
+
+            if (owningType != null)
+            {
+                DeclaringType = owningType;
+            }
+            else
+            {
+                DeclaringType = MetadataNameFormatter.FormatHandle(R2RReader.MetadataReader, owningTypeHandle);
             }
 
             Fixups = fixups;
 
-            DisassemblingTypeProvider provider = new DisassemblingTypeProvider();
-            if (IsGeneric && instanceArgs != null && tok != null)
-            {
-                InitGenericInstances(genericParams, instanceArgs, tok);
-            }
-
-            DisassemblingGenericContext genericContext = new DisassemblingGenericContext(new string[0], _genericParamInstanceMap.Values.ToArray());
-            Signature = _methodDef.DecodeSignature(provider, genericContext);
-
-            SignatureString = GetSignature();
-        }
-
-        /// <summary>
-        /// Initialize map of generic parameters names to the type in the instance
-        /// </summary>
-        private void InitGenericInstances(GenericParameterHandleCollection genericParams, CorElementType[] instanceArgs, uint[] tok)
-        {
-            if (instanceArgs.Length != genericParams.Count || tok.Length != genericParams.Count)
-            {
-                throw new BadImageFormatException("Generic param indices out of bounds");
-            }
-
-            for (int i = 0; i < instanceArgs.Length; i++)
-            {
-                string key = _mdReader.GetString(_mdReader.GetGenericParameter(genericParams.ElementAt(i)).Name); // name of the generic param, eg. "T"
-                string type = instanceArgs[i].ToString(); // type of the generic param instance
-                if (instanceArgs[i] == CorElementType.ELEMENT_TYPE_VALUETYPE)
-                {
-                    var t = _mdReader.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle((int)tok[i]));
-                    type = _mdReader.GetString(t.Name); // name of the struct
-
-                }
-                _genericParamInstanceMap[key] = type;
-            }
-        }
-
-        /// <summary>
-        /// Returns a string with format DeclaringType.Name<GenericTypes,...>(ArgTypes,...)
-        /// </summary>
-        private string GetSignature()
-        {
             StringBuilder sb = new StringBuilder();
+            sb.Append(Signature.ReturnType);
+            sb.Append(" ");
+            sb.Append(DeclaringType);
+            sb.Append(".");
+            sb.Append(Name);
 
-            sb.AppendFormat($"{DeclaringType}.{Name}");
-
-            if (IsGeneric)
+            if (Signature.GenericParameterCount != 0)
             {
                 sb.Append("<");
-                int i = 0;
-                foreach (var instance in _genericParamInstanceMap.Values)
+                for (int i = 0; i < Signature.GenericParameterCount; i++)
                 {
                     if (i > 0)
                     {
                         sb.Append(", ");
                     }
-                    sb.AppendFormat($"{instance}");
-                    i++;
+                    if (instanceArgs != null && instanceArgs.Length > i)
+                    {
+                        sb.Append(instanceArgs[i]);
+                    }
+                    else
+                    {
+                        sb.Append("!");
+                        sb.Append(i);
+                    }
                 }
                 sb.Append(">");
             }
@@ -378,29 +418,39 @@ namespace R2RDump
             }
             sb.Append(")");
 
-            return sb.ToString();
+            SignatureString = sb.ToString();
         }
 
-        public override string ToString()
+        public void WriteTo(TextWriter writer, DumpOptions options)
         {
-            StringBuilder sb = new StringBuilder();
+            writer.WriteLine(SignatureString);
 
-            sb.AppendLine($"{Signature.ReturnType} {SignatureString}");
-
-            sb.AppendLine($"Token: 0x{Token:X8}");
-            sb.AppendLine($"Rid: {Rid}");
-            sb.AppendLine($"EntryPointRuntimeFunctionId: {EntryPointRuntimeFunctionId}");
-            sb.AppendLine($"Number of RuntimeFunctions: {RuntimeFunctions.Count}");
+            writer.WriteLine($"Handle: 0x{MetadataTokens.GetToken(R2RReader.MetadataReader, MethodHandle):X8}");
+            writer.WriteLine($"Rid: {MetadataTokens.GetRowNumber(R2RReader.MetadataReader, MethodHandle)}");
+            if (!options.Naked)
+            {
+                writer.WriteLine($"EntryPointRuntimeFunctionId: {EntryPointRuntimeFunctionId}");
+            }
+            writer.WriteLine($"Number of RuntimeFunctions: {RuntimeFunctions.Count}");
             if (Fixups != null)
             {
-                sb.AppendLine($"Number of fixups: {Fixups.Count()}");
-                foreach (FixupCell cell in Fixups)
+                writer.WriteLine($"Number of fixups: {Fixups.Count()}");
+                IEnumerable<FixupCell> fixups = Fixups;
+                if (options.Normalize)
                 {
-                    sb.AppendLine($"    TableIndex {cell.TableIndex}, Offset {cell.CellOffset:X4}");
+                    fixups = fixups.OrderBy((fc) => fc.Signature);
+                }
+
+                foreach (FixupCell cell in fixups)
+                {
+                    writer.Write("    ");
+                    if (!options.Naked)
+                    {
+                        writer.Write($"TableIndex {cell.TableIndex}, Offset {cell.CellOffset:X4}: ");
+                    }
+                    writer.WriteLine(cell.Signature);
                 }
             }
-
-            return sb.ToString();
         }
     }
 }

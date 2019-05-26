@@ -78,7 +78,14 @@ public:
           pfnTokenDefinition(_pfnTokenDefinition)
     {}
 
-#ifdef FEATURE_PREJIT
+    // Static methods
+
+    // Compare a type handle with a signature whose tokens are resolved with respect to pModule
+    // pZapSigContext is used to resolve ELEMENT_TYPE_MODULE_ZAPSIG encodings
+    static BOOL CompareSignatureToTypeHandle(PCCOR_SIGNATURE  pSig,
+        Module*          pModule,
+        TypeHandle       handle,
+        const ZapSig::Context *  pZapSigContext);
 
     // Instance methods
 
@@ -94,15 +101,7 @@ public:
     BOOL GetSignatureForTypeHandle(TypeHandle typeHandle,
                                    SigBuilder * pSigBuilder);
 
-    // Static methods
-
-    // Compare a type handle with a signature whose tokens are resolved with respect to pModule
-    // pZapSigContext is used to resolve ELEMENT_TYPE_MODULE_ZAPSIG encodings
-    static BOOL CompareSignatureToTypeHandle(PCCOR_SIGNATURE  pSig,   
-                                             Module*          pModule, 
-                                             TypeHandle       handle,
-                                     const ZapSig::Context *  pZapSigContext);
-
+#ifdef FEATURE_PREJIT
     // Compare a type handle with a tagged pointer. Ensure that the common path is inlined into the caller.
     static FORCEINLINE BOOL CompareTaggedPointerToTypeHandle(Module * pModule, TADDR addr, TypeHandle handle)
     {
@@ -115,6 +114,7 @@ public:
     }
 
     static BOOL CompareFixupToTypeHandle(Module * pModule, TADDR fixup, TypeHandle handle);
+#endif
 
     static BOOL CompareTypeHandleFieldToTypeHandle(TypeHandle *pTypeHnd, TypeHandle typeHnd2);
 
@@ -127,7 +127,6 @@ private:
     //
     static CorElementType TryEncodeUsingShortcut(/* in  */ MethodTable * pMT);
 
-#endif // FEATURE_PREJIT
 
 private:
 
@@ -140,13 +139,11 @@ public:
     //--------------------------------------------------------------------
     // Static helper encode/decode helper methods
 
-    static Module *DecodeModuleFromIndexes(Module *fromModule,
-        DWORD assemblyIndex,
-        DWORD moduleIndex);
+    static Module *DecodeModuleFromIndex(Module *fromModule,
+        DWORD index);
 
-    static Module *DecodeModuleFromIndexesIfLoaded(Module *fromModule,
-        DWORD assemblyIndex,
-        DWORD moduleIndex);
+    static Module *DecodeModuleFromIndexIfLoaded(Module *fromModule,
+        DWORD index);
 
     // referencingModule is the module that references the type.
     // fromModule is the module in which the type is defined.

@@ -16,13 +16,11 @@
     SETALIAS CTPMethodTable__s_pThunkTable, ?s_pThunkTable@CTPMethodTable@@0PAVMethodTable@@A
     SETALIAS g_pObjectClass, ?g_pObjectClass@@3PAVMethodTable@@A
 
-    IMPORT GetThread
     IMPORT JIT_InternalThrow
     IMPORT JIT_WriteBarrier
     IMPORT TheUMEntryPrestubWorker
     IMPORT CreateThreadBlockThrow
     IMPORT UMThunkStubRareDisableWorker
-    IMPORT UM2MDoADCallBack
     IMPORT PreStubWorker
     IMPORT PreStubGetMethodDescForCompactEntryPoint
     IMPORT NDirectImportWorker
@@ -59,11 +57,14 @@
 
     IMPORT GetCurrentSavedRedirectContext
 
-    ;; Imports to support virtual import fixup for ngen images
-    IMPORT VirtualMethodFixupWorker
     ;; Import to support cross-moodule external method invocation in ngen images
     IMPORT ExternalMethodFixupWorker
+
+#ifdef FEATURE_PREJIT
+    ;; Imports to support virtual import fixup for ngen images
+    IMPORT VirtualMethodFixupWorker
     IMPORT StubDispatchFixupWorker
+#endif
 
 #ifdef FEATURE_READYTORUN
     IMPORT DynamicHelperWorker
@@ -387,7 +388,8 @@ UMThunkStub_StackArgs SETA 10*4
 
         CHECK_STACK_ALIGNMENT
 
-        bl                  GetThread
+        ; r0 = GetThread(). Trashes r5
+        INLINE_GETTHREAD    r0, r5
         cbz                 r0, UMThunkStub_DoThreadSetup
 
 UMThunkStub_HaveThread
@@ -404,13 +406,7 @@ UMThunkStub_HaveThread
 UMThunkStub_InCooperativeMode
         ldr                 r12, [r7, #UMThunkStub_HiddenArg]
 
-        ldr                 r0, [r5, #Thread__m_pDomain]
-        ldr                 r1, [r12, #UMEntryThunk__m_dwDomainId]
-        ldr                 r0, [r0, #AppDomain__m_dwId]
         ldr                 r3, [r12, #UMEntryThunk__m_pUMThunkMarshInfo]
-        cmp                 r0, r1
-        bne                 UMThunkStub_WrongAppDomain
-
         ldr                 r2, [r3, #UMThunkMarshInfo__m_cbActualArgSize]
         cbz                 r2, UMThunkStub_ArgumentsSetup
 
@@ -463,95 +459,9 @@ UMThunkStub_DoTrapReturningThreads
         add                 sp, #SIZEOF__FloatArgumentRegisters
         b                   UMThunkStub_InCooperativeMode
 
-UMThunkStub_WrongAppDomain
-        sub                 sp, #SIZEOF__FloatArgumentRegisters
-        vstm                sp, {d0-d7}
-
-        ldr                 r0, [r7, #UMThunkStub_HiddenArg]  ; UMEntryThunk* pUMEntry
-        mov                 r2, r7              ; void * pArgs
-        ; remaining arguments are unused
-        bl                  UM2MDoADCallBack
-
-        ; Restore non-FP return value.
-        ldr                 r0, [r7, #0]
-        ldr                 r1, [r7, #4]
-
-        ; Restore FP return value or HFA.
-        vldm                sp, {d0-d3}
-        b                   UMThunkStub_PostCall
-
         NESTED_END
-
-; UM2MThunk_WrapperHelper(void *pThunkArgs,             // r0
-;                         int cbStackArgs,              // r1 (unused)
-;                         void *pAddr,                  // r2 (unused)
-;                         UMEntryThunk *pEntryThunk,    // r3
-;                         Thread *pThread)              // [sp, #0]
-
-        NESTED_ENTRY UM2MThunk_WrapperHelper
-
-        PROLOG_PUSH         {r4-r7,r11,lr}
-        PROLOG_STACK_SAVE   r7
-
-        CHECK_STACK_ALIGNMENT
-
-        mov                 r12, r3                     // r12 = UMEntryThunk *
-
-        ;
-        ; Note that layout of the arguments is given by UMThunkStub frame
-        ;
-        mov                 r5, r0                      // r5 = pArgs
-
-        ldr                 r3, [r12, #UMEntryThunk__m_pUMThunkMarshInfo]
         
-        ldr                 r2, [r3, #UMThunkMarshInfo__m_cbActualArgSize]
-        cbz                 r2, UM2MThunk_WrapperHelper_ArgumentsSetup
-
-        add                 r0, r5, #UMThunkStub_StackArgs ; Source pointer
-        add                 r0, r0, r2
-        lsr                 r1, r2, #2      ; Count of stack slots to copy
-
-        and                 r2, r2, #4      ; Align the stack
-        sub                 sp, sp, r2
-
-UM2MThunk_WrapperHelper_StackLoop
-        ldr                 r2, [r0,#-4]!
-        str                 r2, [sp,#-4]!
-        subs                r1, r1, #1
-        bne                 UM2MThunk_WrapperHelper_StackLoop
-
-UM2MThunk_WrapperHelper_ArgumentsSetup
-        ldr                 r4, [r3, #UMThunkMarshInfo__m_pILStub]
-
-        ; reload floating point registers
-        sub                 r6, r5, #SIZEOF__FloatArgumentRegisters
-        vldm                r6, {d0-d7}
-
-        ; reload argument registers
-        ldm                 r5, {r0-r3}
-
-        CHECK_STACK_ALIGNMENT
-
-        blx                 r4
-
-        ; Save non-floating point return
-        str                 r0, [r5, #0]
-        str                 r1, [r5, #4]
-
-        ; Save FP return value or HFA.
-        vstm                r6, {d0-d3}
-
-#ifdef _DEBUG
-        ;; trash the floating point registers to ensure that the HFA return values 
-        ;; won't survive by accident
-        vldm                sp, {d0-d3}
-#endif
-
-        EPILOG_STACK_RESTORE r7
-        EPILOG_POP          {r4-r7,r11,pc}
-
-        NESTED_END
-
+        INLINE_GETTHREAD_CONSTANT_POOL
 
 ; ------------------------------------------------------------------
 
@@ -799,7 +709,7 @@ LsetFP8
 ;
         NESTED_ENTRY GenericComPlusCallStub
 
-        PROLOG_WITH_TRANSITION_BLOCK 0x20
+        PROLOG_WITH_TRANSITION_BLOCK ASM_ENREGISTERED_RETURNTYPE_MAXSIZE
 
         add         r0, sp, #__PWTB_TransitionBlock ; pTransitionBlock
         mov         r1, r12                         ; pMethodDesc
@@ -813,7 +723,7 @@ LsetFP8
         ; r0 = fpRetSize
 
         ; return value is stored before float argument registers
-        add         r1, sp, #(__PWTB_FloatArgumentRegisters - 0x20)
+        add         r1, sp, #(__PWTB_FloatArgumentRegisters - ASM_ENREGISTERED_RETURNTYPE_MAXSIZE)
         bl          setStubReturnValue
 
         EPILOG_WITH_TRANSITION_BLOCK_RETURN
@@ -1334,6 +1244,7 @@ stackProbe_loop
     EPILOG_RETURN
     NESTED_END
 
+#ifdef FEATURE_PREJIT
 ;------------------------------------------------
 ; VirtualMethodFixupStub
 ;
@@ -1388,6 +1299,7 @@ stackProbe_loop
     EPILOG_BRANCH_REG r12
 
     NESTED_END
+#endif // FEATURE_PREJIT
 
 ;------------------------------------------------
 ; ExternalMethodFixupStub
@@ -1426,6 +1338,7 @@ stackProbe_loop
 
     NESTED_END
 
+#ifdef FEATURE_PREJIT
 ;------------------------------------------------
 ; StubDispatchFixupStub
 ;
@@ -1458,6 +1371,7 @@ stackProbe_loop
     EPILOG_BRANCH_REG   r12
  
     NESTED_END
+#endif // FEATURE_PREJIT
 
 ;------------------------------------------------
 ; JIT_RareDisableHelper

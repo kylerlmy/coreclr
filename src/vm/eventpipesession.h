@@ -7,15 +7,14 @@
 
 #ifdef FEATURE_PERFTRACING
 
-enum class EventPipeEventLevel;
-struct EventPipeProviderConfiguration;
 class EventPipeSessionProviderList;
 class EventPipeSessionProvider;
 
 enum class EventPipeSessionType
 {
-    File,
-    Streaming
+    File,       // EventToFile
+    Streaming,  // EventToEventListener
+    IpcStream   // EventToIpc
 };
 
 class EventPipeSession
@@ -26,7 +25,7 @@ private:
 
     // The configured size of the circular buffer.
     size_t m_circularBufferSizeInBytes;
-    
+
     // True if rundown is enabled.
     Volatile<bool> m_rundownEnabled;
 
@@ -46,9 +45,8 @@ public:
     EventPipeSession(
         EventPipeSessionType sessionType,
         unsigned int circularBufferSizeInMB,
-        EventPipeProviderConfiguration *pProviders,
-        unsigned int numProviders);
-
+        const EventPipeProviderConfiguration *pProviders,
+        uint32_t numProviders);
     ~EventPipeSession();
 
     // Determine if the session is valid or not.  Invalid sessions can be detected before they are enabled.
@@ -96,76 +94,11 @@ public:
         return m_sessionStartTimeStamp;
     }
 
-    // Enable all events.
-    // This is used for testing and is controlled via COMPLUS_EnableEventPipe.
-    void EnableAllEvents();
-
     // Add a new provider to the session.
     void AddSessionProvider(EventPipeSessionProvider *pProvider);
 
     // Get the session provider for the specified provider if present.
     EventPipeSessionProvider* GetSessionProvider(EventPipeProvider *pProvider);
-};
-
-class EventPipeSessionProviderList
-{
-
-private:
-
-    // The list of providers.
-    SList<SListElem<EventPipeSessionProvider*>> *m_pProviders;
-
-    // A catch-all provider used when tracing is enabled at start-up
-    // under (COMPlus_PerformanceTracing & 1) == 1.
-    EventPipeSessionProvider *m_pCatchAllProvider;
-
-public:
-
-    // Create a new list based on the input.
-    EventPipeSessionProviderList(EventPipeProviderConfiguration *pConfigs, unsigned int numConfigs);
-    ~EventPipeSessionProviderList();
-
-    // Enable all events.
-    // This is used for testing and is controlled via COMPLUS_EnableEventPipe.
-    void EnableAllEvents();
-
-    // Add a new session provider to the list.
-    void AddSessionProvider(EventPipeSessionProvider *pProvider);
-
-    // Get the session provider for the specified provider.
-    // Return NULL if one doesn't exist.
-    EventPipeSessionProvider* GetSessionProvider(EventPipeProvider *pProvider);
-
-    // Returns true if the list is empty.
-    bool IsEmpty() const;
-};
-
-class EventPipeSessionProvider
-{
-private:
-
-    // The provider name.
-    WCHAR *m_pProviderName;
-
-    // The enabled keywords.
-    UINT64 m_keywords;
-
-    // The loging level.
-    EventPipeEventLevel m_loggingLevel;
-
-public:
-
-    EventPipeSessionProvider(
-        LPCWSTR providerName,
-        UINT64 keywords,
-        EventPipeEventLevel loggingLevel);
-    ~EventPipeSessionProvider();
-
-    LPCWSTR GetProviderName() const;
-
-    UINT64 GetKeywords() const;
-
-    EventPipeEventLevel GetLevel() const;
 };
 
 #endif // FEATURE_PERFTRACING
